@@ -1,373 +1,462 @@
+/*
+ * SLITHER PSP - v2.0
+ * Homebrew independente para PSP / PPSSPP.
+ * Inspirado na mecanica de cobras, comida e crescimento de jogos .io.
+ * Controles: analógico/D-pad = virar; X = acelerar; START = pausar/voltar;
+ * SELECT = reiniciar partida.
+ */
+
 #include <pspkernel.h>
+#include <pspdebug.h>
 #include <pspdisplay.h>
+#include <pspctrl.h>
 #include <pspgu.h>
 #include <pspgum.h>
-#include <pspctrl.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
-PSP_MODULE_INFO("Slither PSP Homebrew", 0, 1, 0);
+PSP_MODULE_INFO("Slither PSP", 0, 1, 0);
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
 
-#define SCREEN_W 480
-#define SCREEN_H 272
-#define MAX_SNAKES 8
-#define MAX_SEGMENTS 180
+#define SW 480
+#define SH 272
+#define BUF_W 512
+#define PI 3.14159265358979323846f
 #define MAX_FOOD 220
-#define PI 3.14159265f
+#define MAX_SNAKES 9
+#define PATH_SIZE 1024
+#define MAX_BODY 105
+#define FOOD_R 3.0f
 
+typedef struct { float x, y; } Vec2;
+typedef struct { unsigned int color; short x, y, z; } Vertex;
 typedef struct {
-    float x;
-    float y;
-} Vec2;
-
-typedef struct {
-    Vec2 p[MAX_SEGMENTS];
-    int len;
-    float angle;
-    float speed;
-    unsigned int color;
-    int alive;
-    int bot;
-    float think;
+    float x, y, a, speed;
+    int length, alive, bot, skin, pathAt;
+    Vec2 path[PATH_SIZE];
 } Snake;
+typedef struct { float x, y; int active; unsigned int color; } Food;
 
-typedef struct {
-    Vec2 p;
-    int active;
-} Food;
-
-static unsigned int __attribute__((aligned(16))) displayList[262144];
+static unsigned int __attribute__((aligned(16))) list[262144];
+static Vertex circleVerts[40];
 static Snake snakes[MAX_SNAKES];
-static Food food[MAX_FOOD];
-static int running = 1;
-
-static const unsigned int snakeColors[] = {
-    0xFF35C9FF, 0xFF55DD55, 0xFFFFAA33, 0xFFDD55DD,
-    0xFF55FFFF, 0xFFFF5577, 0xFFBBBBFF, 0xFFFFFF55
+static Food foods[MAX_FOOD];
+static int screenMode = 0; /* 0 menu, 1 jogo, 2 game over, 3 pausa */
+static int selectedSkin = 0;
+static int score = 0;
+static int bestScore = 0;
+static int frameNo = 0;
+static int boostFlash = 0;
+static unsigned int skins[] = {
+    0xFF32D7FF, 0xFFFF4B4B, 0xFF48E080, 0xFFFFD34D,
+    0xFFB56BFF, 0xFFFF8B35, 0xFF45E5D0, 0xFFF4F4F4
+};
+static const char *skinNames[] = {
+    "AZUL", "VERMELHA", "VERDE", "AMARELA",
+    "ROXA", "LARANJA", "TURQUESA", "BRANCA"
 };
 
-static float randomFloat(float min, float max) {
-    return min + ((float)rand() / (float)RAND_MAX) * (max - min);
+static float frand(float maxv) { return ((float)rand() / (float)RAND_MAX) * maxv; }
+static float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
+static float wrapAngle(float a) {
+    while (a > PI) a -= 2.0f * PI;
+    while (a < -PI) a += 2.0f * PI;
+    return a;
+}
+static float dist2(float x1, float y1, float x2, float y2) {
+    float dx=x1-x2, dy=y1-y2; return dx*dx+dy*dy;
+}
+static Vec2 worldToScreen(float x, float y) {
+    Vec2 p = { x - snakes[0].x + SW*0.5f, y - snakes[0].y + SH*0.5f };
+    return p;
 }
 
-static float distanceSquared(Vec2 a, Vec2 b) {
-    float dx = a.x - b.x;
-    float dy = a.y - b.y;
-    return dx * dx + dy * dy;
+static void drawPoly(Vertex *v, int n, int prim) {
+    sceGuDrawArray(prim, GU_COLOR_8888 | GU_VERTEX_16BIT | GU_TRANSFORM_2D,
+                   n, 0, v);
 }
-
-static void initializeSnake(Snake *snake, int index, int isBot) {
-    memset(snake, 0, sizeof(Snake));
-
-    snake->len = 22;
-    snake->angle = randomFloat(0.0f, 2.0f * PI);
-    snake->speed = isBot ? 1.25f : 1.55f;
-    snake->color = snakeColors[index % 8];
-    snake->alive = 1;
-    snake->bot = isBot;
-    snake->think = randomFloat(0.3f, 1.5f);
-
-    snake->p[0].x = randomFloat(-650.0f, 650.0f);
-    snake->p[0].y = randomFloat(-650.0f, 650.0f);
-
-    for (int i = 1; i < snake->len; i++) {
-        snake->p[i].x = snake->p[0].x - cosf(snake->angle) * i * 7.0f;
-        snake->p[i].y = snake->p[0].y - sinf(snake->angle) * i * 7.0f;
+static void rect(float x, float y, float w, float h, unsigned int c) {
+    Vertex v[4] = {
+        {c,(short)x,(short)y,0}, {c,(short)(x+w),(short)y,0},
+        {c,(short)x,(short)(y+h),0}, {c,(short)(x+w),(short)(y+h),0}
+    };
+    drawPoly(v,4,GU_TRIANGLE_STRIP);
+}
+static void circle(float x, float y, float r, unsigned int c) {
+    int i;
+    circleVerts[0].color=c; circleVerts[0].x=(short)x;
+    circleVerts[0].y=(short)y; circleVerts[0].z=0;
+    for(i=0;i<=32;i++) {
+        float a=(2.0f*PI*(float)i)/32.0f;
+        circleVerts[i+1].color=c;
+        circleVerts[i+1].x=(short)(x+cosf(a)*r);
+        circleVerts[i+1].y=(short)(y+sinf(a)*r);
+        circleVerts[i+1].z=0;
+    }
+    drawPoly(circleVerts,34,GU_TRIANGLE_FAN);
+}
+static void line(float x1,float y1,float x2,float y2,unsigned int c) {
+    Vertex v[2]={{c,(short)x1,(short)y1,0},{c,(short)x2,(short)y2,0}};
+    drawPoly(v,2,GU_LINES);
+}
+static void textAt(int x,int y,const char *s) {
+    pspDebugScreenSetXY(x,y);
+    pspDebugScreenPrintf("%s",s);
+}
+static void textCenter(int y,const char *s) {
+    int n=(int)strlen(s);
+    int x=(SW/8-n)/2;
+    if(x<0)x=0;
+    textAt(x,y,s);
+}
+static void drawBackground(void) {
+    int x,y;
+    rect(0,0,SW,SH,0xFF17121D);
+    for(x=-((int)snakes[0].x%40);x<SW;x+=40)
+        line((float)x,0,(float)x,SH,0xFF292333);
+    for(y=-((int)snakes[0].y%40);y<SH;y+=40)
+        line(0,(float)y,SW,(float)y,0xFF292333);
+    /* pequenas marcas luminosas no campo */
+    for(x=20;x<SW;x+=80) for(y=20;y<SH;y+=80)
+        circle((float)x,(float)y,1.2f,0xFF3B3347);
+}
+static void spawnFood(int i,float cx,float cy) {
+    foods[i].x=cx+frand(1250.0f)-625.0f;
+    foods[i].y=cy+frand(1250.0f)-625.0f;
+    foods[i].active=1;
+    {
+        static unsigned int fc[]={0xFFFFD84A,0xFFFF6E9D,0xFF55E9D0,
+                                  0xFF8C78FF,0xFF7BE36B,0xFFFF9A42};
+        foods[i].color=fc[rand()%6];
     }
 }
-
-static void spawnFood(void) {
-    for (int i = 0; i < MAX_FOOD; i++) {
-        if (!food[i].active) {
-            food[i].active = 1;
-            food[i].p.x = randomFloat(-1100.0f, 1100.0f);
-            food[i].p.y = randomFloat(-1100.0f, 1100.0f);
-            return;
-        }
+static void initSnake(Snake *s,int bot,int skin,float x,float y) {
+    int i;
+    memset(s,0,sizeof(Snake));
+    s->x=x; s->y=y; s->a=frand(2.0f*PI); s->speed=1.65f;
+    s->length=bot?18:22; s->alive=1; s->bot=bot; s->skin=skin;
+    s->pathAt=0;
+    for(i=0;i<PATH_SIZE;i++) {
+        s->path[i].x=x-cosf(s->a)*(float)i*1.8f;
+        s->path[i].y=y-sinf(s->a)*(float)i*1.8f;
     }
 }
-
 static void resetGame(void) {
-    memset(food, 0, sizeof(food));
-
-    for (int i = 0; i < MAX_SNAKES; i++) {
-        initializeSnake(&snakes[i], i, i != 0);
+    int i;
+    score=0; frameNo=0;
+    initSnake(&snakes[0],0,selectedSkin,0,0);
+    for(i=1;i<MAX_SNAKES;i++)
+        initSnake(&snakes[i],1,(i+2)%8,frand(1500)-750,frand(1500)-750);
+    for(i=0;i<MAX_FOOD;i++) spawnFood(i,0,0);
+    screenMode=1;
+}
+static void addLength(Snake *s,int amount) {
+    s->length+=amount;
+    if(s->length>MAX_BODY)s->length=MAX_BODY;
+}
+static void steerToward(Snake *s,float targetX,float targetY,float turnRate) {
+    float wanted=atan2f(targetY-s->y,targetX-s->x);
+    float diff=wrapAngle(wanted-s->a);
+    s->a=wrapAngle(s->a+clampf(diff,-turnRate,turnRate));
+}
+static void updateBot(Snake *s,int index) {
+    int i;
+    float tx=s->x+cosf(s->a)*180.0f, ty=s->y+sinf(s->a)*180.0f;
+    float best=1.0e20f;
+    /* procura comida visivel */
+    for(i=0;i<MAX_FOOD;i++) if(foods[i].active) {
+        float d=dist2(s->x,s->y,foods[i].x,foods[i].y);
+        if(d<best && d<430.0f*430.0f) {
+            best=d; tx=foods[i].x; ty=foods[i].y;
+        }
     }
-
-    for (int i = 0; i < MAX_FOOD; i++) {
-        spawnFood();
+    /* tenta evitar cabecas e corpos proximos */
+    for(i=0;i<MAX_SNAKES;i++) if(i!=index && snakes[i].alive) {
+        float d=dist2(s->x,s->y,snakes[i].x,snakes[i].y);
+        if(d<115.0f*115.0f) {
+            float away=atan2f(s->y-snakes[i].y,s->x-snakes[i].x);
+            tx=s->x+cosf(away)*230.0f;
+            ty=s->y+sinf(away)*230.0f;
+        }
+    }
+    steerToward(s,tx,ty,0.055f);
+}
+static void updateSnake(Snake *s,int isPlayer,int index,int boosting) {
+    float speed=s->speed;
+    if(isPlayer && boosting && s->length>12) speed=2.55f;
+    if(!isPlayer) speed=1.35f+(float)(index%3)*0.12f;
+    s->x+=cosf(s->a)*speed;
+    s->y+=sinf(s->a)*speed;
+    s->pathAt=(s->pathAt+1)%PATH_SIZE;
+    s->path[s->pathAt].x=s->x;
+    s->path[s->pathAt].y=s->y;
+    if(isPlayer && boosting && s->length>12 && frameNo%9==0) s->length--;
+}
+static Vec2 getBodyPoint(Snake *s,int segment) {
+    int back=(int)(segment*2.25f);
+    int at=(s->pathAt-back)%PATH_SIZE;
+    if(at<0)at+=PATH_SIZE;
+    return s->path[at];
+}
+static void drawSnake(Snake *s,int isPlayer) {
+    int i, count=s->length;
+    unsigned int base=skins[s->skin];
+    for(i=count-1;i>=0;i--) {
+        Vec2 p=getBodyPoint(s,i);
+        Vec2 q=worldToScreen(p.x,p.y);
+        float r=(i==0)?10.0f:7.0f;
+        unsigned int col=base;
+        if(i%5==0) col=(base&0xFF000000)|(((base&0x00FEFEFE)>>1)+0x00202020);
+        if(q.x>-20&&q.x<SW+20&&q.y>-20&&q.y<SH+20) {
+            circle(q.x,q.y,r+1.4f,0xFF08080D);
+            circle(q.x,q.y,r,col);
+            if(i==0) {
+                float ex=q.x+cosf(s->a+0.75f)*4.0f;
+                float ey=q.y+sinf(s->a+0.75f)*4.0f;
+                circle(ex,ey,2.0f,0xFFFFFFFF);
+                circle(q.x+cosf(s->a-0.75f)*4.0f,
+                       q.y+sinf(s->a-0.75f)*4.0f,2.0f,0xFFFFFFFF);
+            }
+        }
+    }
+    if(isPlayer) {
+        Vec2 p=worldToScreen(s->x,s->y);
+        circle(p.x,p.y,13.0f,0x5533FFFF);
     }
 }
-
-static void updateSnake(Snake *snake, float dt, SceCtrlData *pad) {
-    if (!snake->alive) {
-        return;
-    }
-
-    if (!snake->bot) {
-        float x = 0.0f;
-        float y = 0.0f;
-
-        if (pad->Lx > 150) x += 1.0f;
-        if (pad->Lx < 105) x -= 1.0f;
-        if (pad->Ly > 150) y += 1.0f;
-        if (pad->Ly < 105) y -= 1.0f;
-
-        if (x != 0.0f || y != 0.0f) {
-            float target = atan2f(y, x);
-            float diff = target - snake->angle;
-
-            while (diff > PI) diff -= 2.0f * PI;
-            while (diff < -PI) diff += 2.0f * PI;
-
-            snake->angle += diff * 4.0f * dt;
-        }
-    } else {
-        snake->think -= dt;
-
-        if (snake->think <= 0.0f) {
-            snake->angle += randomFloat(-1.15f, 1.15f);
-            snake->think = randomFloat(0.4f, 1.8f);
-        }
-
-        /* Bots gently turn toward nearby food. */
-        for (int i = 0; i < MAX_FOOD; i++) {
-            if (food[i].active &&
-                distanceSquared(snake->p[0], food[i].p) < 15000.0f) {
-                float target = atan2f(
-                    food[i].p.y - snake->p[0].y,
-                    food[i].p.x - snake->p[0].x
-                );
-                float diff = target - snake->angle;
-
-                while (diff > PI) diff -= 2.0f * PI;
-                while (diff < -PI) diff += 2.0f * PI;
-
-                snake->angle += diff * 0.35f * dt;
-                break;
-            }
-        }
-    }
-
-    Vec2 next;
-    next.x = snake->p[0].x + cosf(snake->angle) * snake->speed * 60.0f * dt;
-    next.y = snake->p[0].y + sinf(snake->angle) * snake->speed * 60.0f * dt;
-
-    for (int i = snake->len - 1; i > 0; i--) {
-        snake->p[i] = snake->p[i - 1];
-    }
-
-    snake->p[0] = next;
-}
-
-static void updateGame(float dt, SceCtrlData *pad) {
-    for (int i = 0; i < MAX_SNAKES; i++) {
-        updateSnake(&snakes[i], dt, pad);
-    }
-
-    for (int i = 0; i < MAX_SNAKES; i++) {
-        if (!snakes[i].alive) {
-            continue;
-        }
-
-        /* Eat food and grow. */
-        for (int f = 0; f < MAX_FOOD; f++) {
-            if (food[f].active &&
-                distanceSquared(snakes[i].p[0], food[f].p) < 170.0f) {
-                food[f].active = 0;
-
-                if (snakes[i].len < MAX_SEGMENTS - 1) {
-                    snakes[i].p[snakes[i].len] =
-                        snakes[i].p[snakes[i].len - 1];
-                    snakes[i].len++;
-                }
-
-                spawnFood();
-            }
-        }
-
-        /* Simple body collision. A collided snake respawns. */
-        int collided = 0;
-
-        for (int j = 0; j < MAX_SNAKES && !collided; j++) {
-            if (!snakes[j].alive) {
-                continue;
-            }
-
-            int firstSegment = (i == j) ? 12 : 0;
-
-            for (int k = firstSegment; k < snakes[j].len; k++) {
-                if (distanceSquared(snakes[i].p[0], snakes[j].p[k]) < 55.0f) {
-                    collided = 1;
-                    break;
-                }
-            }
-        }
-
-        if (collided) {
-            initializeSnake(&snakes[i], i, i != 0);
+static void drawFood(void) {
+    int i;
+    for(i=0;i<MAX_FOOD;i++) if(foods[i].active) {
+        Vec2 p=worldToScreen(foods[i].x,foods[i].y);
+        if(p.x>-8&&p.x<SW+8&&p.y>-8&&p.y<SH+8) {
+            circle(p.x,p.y,5.0f,0x55333333);
+            circle(p.x,p.y,FOOD_R,foods[i].color);
+            circle(p.x-1.0f,p.y-1.0f,1.1f,0xAAFFFFFF);
         }
     }
 }
-
-/*
- * Draw a square using GU_SPRITES.
- * GU_SPRITES uses two vertices: top-left and bottom-right.
- * This replaces the unsupported sceGuPointSize() call.
- */
-static void drawPoint(float x, float y, unsigned int color, int size) {
-    ScePspFVector2 vertices[2];
-
-    vertices[0].x = x - (float)size * 0.5f;
-    vertices[0].y = y - (float)size * 0.5f;
-    vertices[1].x = x + (float)size * 0.5f;
-    vertices[1].y = y + (float)size * 0.5f;
-
-    sceGuColor(color);
-    sceGuDrawArray(
-        GU_SPRITES,
-        GU_VERTEX_32BITF | GU_TRANSFORM_2D,
-        2,
-        NULL,
-        vertices
-    );
+static void eatFood(void) {
+    int i,j;
+    for(i=0;i<MAX_SNAKES;i++) if(snakes[i].alive) {
+        for(j=0;j<MAX_FOOD;j++) if(foods[j].active) {
+            if(dist2(snakes[i].x,snakes[i].y,foods[j].x,foods[j].y)<18.0f*18.0f) {
+                foods[j].active=0;
+                addLength(&snakes[i],1);
+                if(i==0)score+=10;
+                spawnFood(j,snakes[0].x,snakes[0].y);
+            }
+        }
+    }
 }
-
-static void drawScene(void) {
-    sceGuStart(GU_DIRECT, displayList);
-
-    sceGuClearColor(0xFF101820);
-    sceGuClear(GU_COLOR_BUFFER_BIT);
-    sceGuDisable(GU_DEPTH_TEST);
-    sceGuDisable(GU_TEXTURE_2D);
-    sceGuShadeModel(GU_FLAT);
-
-    Vec2 camera = snakes[0].p[0];
-
-    /* Arena grid. */
-    sceGuColor(0xFF1C2A32);
-
-    for (int x = -1200; x <= 1200; x += 100) {
-        ScePspFVector2 line[2];
-
-        line[0].x = SCREEN_W / 2.0f + x - camera.x;
-        line[0].y = SCREEN_H / 2.0f - camera.y - 1200.0f;
-        line[1].x = SCREEN_W / 2.0f + x - camera.x;
-        line[1].y = SCREEN_H / 2.0f - camera.y + 1200.0f;
-
-        sceGuDrawArray(
-            GU_LINES,
-            GU_VERTEX_32BITF | GU_TRANSFORM_2D,
-            2, NULL, line
-        );
-    }
-
-    for (int y = -1200; y <= 1200; y += 100) {
-        ScePspFVector2 line[2];
-
-        line[0].x = SCREEN_W / 2.0f - camera.x - 1200.0f;
-        line[0].y = SCREEN_H / 2.0f + y - camera.y;
-        line[1].x = SCREEN_W / 2.0f - camera.x + 1200.0f;
-        line[1].y = SCREEN_H / 2.0f + y - camera.y;
-
-        sceGuDrawArray(
-            GU_LINES,
-            GU_VERTEX_32BITF | GU_TRANSFORM_2D,
-            2, NULL, line
-        );
-    }
-
-    /* Food. */
-    for (int i = 0; i < MAX_FOOD; i++) {
-        if (food[i].active) {
-            float x = SCREEN_W / 2.0f + food[i].p.x - camera.x;
-            float y = SCREEN_H / 2.0f + food[i].p.y - camera.y;
-
-            if (x > -5.0f && x < SCREEN_W + 5.0f &&
-                y > -5.0f && y < SCREEN_H + 5.0f) {
-                drawPoint(x, y, 0xFF55EEDD, 5);
-            }
+static int hitOtherBody(Snake *s,int selfIndex) {
+    int i,j;
+    for(i=0;i<MAX_SNAKES;i++) if(i!=selfIndex && snakes[i].alive) {
+        for(j=3;j<snakes[i].length;j+=2) {
+            Vec2 p=getBodyPoint(&snakes[i],j);
+            if(dist2(s->x,s->y,p.x,p.y)<12.5f*12.5f)return 1;
         }
     }
-
-    /* Snakes: tail first, head last. */
-    for (int i = 0; i < MAX_SNAKES; i++) {
-        if (!snakes[i].alive) {
-            continue;
-        }
-
-        for (int k = snakes[i].len - 1; k >= 0; k--) {
-            float x = SCREEN_W / 2.0f + snakes[i].p[k].x - camera.x;
-            float y = SCREEN_H / 2.0f + snakes[i].p[k].y - camera.y;
-
-            if (x > -12.0f && x < SCREEN_W + 12.0f &&
-                y > -12.0f && y < SCREEN_H + 12.0f) {
-                drawPoint(
-                    x, y, snakes[i].color,
-                    (k == 0) ? 13 : 10
-                );
-            }
+    return 0;
+}
+static void collisions(void) {
+    int i;
+    for(i=1;i<MAX_SNAKES;i++) if(snakes[i].alive) {
+        if(hitOtherBody(&snakes[i],i)) {
+            snakes[i].alive=0;
         }
     }
-
-    /* Player head marker. */
-    drawPoint(SCREEN_W / 2.0f, SCREEN_H / 2.0f, 0xFFFFFFFF, 5);
-
-    sceGuFinish();
-    sceGuSync(0, 0);
-    sceDisplayWaitVblankStart();
-    sceGuSwapBuffers();
+    if(hitOtherBody(&snakes[0],0)) {
+        screenMode=2;
+        if(score>bestScore)bestScore=score;
+    }
+    for(i=1;i<MAX_SNAKES;i++) if(!snakes[i].alive && frameNo%30==0) {
+        int j;
+        for(j=0;j<snakes[i].length;j+=2) {
+            Vec2 p=getBodyPoint(&snakes[i],j);
+            int k=(j*7+i*13)%MAX_FOOD;
+            foods[k].x=p.x; foods[k].y=p.y; foods[k].active=1;
+            foods[k].color=0xFFFFD84A;
+        }
+        initSnake(&snakes[i],1,(i+2)%8,
+                  snakes[0].x+frand(1500)-750,
+                  snakes[0].y+frand(1500)-750);
+    }
+}
+static void drawHud(void) {
+    char buf[80];
+    rect(8,8,148,34,0xAA090A12);
+    sprintf(buf,"PONTOS: %d",score);
+    textAt(2,1,buf);
+    sprintf(buf,"TAMANHO: %d",snakes[0].length);
+    textAt(2,2,buf);
+    textAt(45,1,"SLITHER PSP");
+    textAt(2,32,"X: TURBO   START: PAUSAR");
+}
+static void drawMenu(void) {
+    char b[80];
+    rect(0,0,SW,SH,0xFF17121D);
+    /* fundo decorativo */
+    {
+        int i;
+        for(i=0;i<18;i++) {
+            float x=(float)((i*71+frameNo*2)%520)-20;
+            float y=(float)((i*43+frameNo)%300)-10;
+            circle(x,y,3.0f,0xFF3D344C);
+        }
+    }
+    circle(240,104,22,0xFF08080D);
+    circle(240,104,19,skins[selectedSkin]);
+    circle(233,98,3,0xFFFFFFFF);
+    circle(247,98,3,0xFFFFFFFF);
+    (void)b;
+}
+static void drawMenuText(void) {
+    char b[80];
+    textCenter(3,"SLITHER PSP");
+    textCenter(6,"SOBREVIVA, COMA E CRESCA!");
+    textCenter(17,"ESCOLHA SUA SKIN");
+    sprintf(b,"<  %s  >",skinNames[selectedSkin]);
+    textCenter(19,b);
+    textCenter(23,"X - JOGAR");
+    textCenter(25,"ANALOGICO / SETAS - VIRAR");
+    textCenter(27,"X DURANTE A PARTIDA - TURBO");
+    textCenter(30,"BOTS OFFLINE - SEM INTERNET");
+}
+static void drawGameOver(void) {
+    rect(75,65,330,140,0xEE080810);
+    textCenter(11,"FIM DE JOGO!");
+    {
+        char b[80];
+        sprintf(b,"PONTUACAO: %d",score); textCenter(15,b);
+        sprintf(b,"RECORDE: %d",bestScore); textCenter(17,b);
+    }
+    textCenter(21,"X - JOGAR NOVAMENTE");
+    textCenter(23,"START - MENU");
+}
+static void drawPause(void) {
+    rect(105,80,270,105,0xEE080810);
+    textCenter(13,"PAUSADO");
+    textCenter(17,"START - CONTINUAR");
+    textCenter(20,"SELECT - REINICIAR");
+}
+static int running=1;
+int exitCallback(int arg1,int arg2,void *common) { running=0; return 0; }
+int callbackThread(SceSize args,void *argp) {
+    int cbid=sceKernelCreateCallback("Exit Callback",exitCallback,0);
+    sceKernelRegisterExitCallback(cbid);
+    sceKernelSleepThreadCB();
+    return 0;
+}
+int setupCallbacks(void) {
+    int thid=sceKernelCreateThread("Callback Thread",callbackThread,0x11,0xFA0,0,0);
+    if(thid>=0)sceKernelStartThread(thid,0,0);
+    return thid;
 }
 
 int main(void) {
+    SceCtrlData pad,old;
+    int i;
+    srand(0x51A7);
+    setupCallbacks();
+    pspDebugScreenInit();
     sceCtrlSetSamplingCycle(0);
     sceCtrlSetSamplingMode(PSP_CTRL_MODE_ANALOG);
 
     sceGuInit();
-    sceGuStart(GU_DIRECT, displayList);
-
-    sceGuDrawBuffer(GU_PSM_8888, (void *)0, 512);
-    sceGuDispBuffer(SCREEN_W, SCREEN_H, (void *)0x88000, 512);
-    sceGuOffset(2048 - SCREEN_W / 2, 2048 - SCREEN_H / 2);
-    sceGuViewport(2048, 2048, SCREEN_W, SCREEN_H);
-    sceGuDepthRange(0xC350, 0x2710);
-    sceGuScissor(0, 0, SCREEN_W, SCREEN_H);
+    sceGuStart(GU_DIRECT,list);
+    sceGuDrawBuffer(GU_PSM_8888,(void*)0,BUF_W);
+    sceGuDispBuffer(SW,SH,(void*)0x88000,BUF_W);
+    sceGuDepthBuffer((void*)0x110000,BUF_W);
+    sceGuOffset(2048-(SW/2),2048-(SH/2));
+    sceGuViewport(2048,2048,SW,SH);
+    sceGuDepthRange(65535,0);
+    sceGuScissor(0,0,SW,SH);
     sceGuEnable(GU_SCISSOR_TEST);
-
+    sceGuDisable(GU_DEPTH_TEST);
+    sceGuShadeModel(GU_SMOOTH);
+    sceGuClearColor(0xFF17121D);
+    sceGuClear(GU_COLOR_BUFFER_BIT|GU_DEPTH_BUFFER_BIT);
     sceGuFinish();
-    sceGuSync(0, 0);
-    sceDisplayWaitVblankStart();
+    sceGuSync(0,0);
     sceGuDisplay(GU_TRUE);
 
-    srand(12345);
-    resetGame();
+    memset(&old,0,sizeof(old));
+    for(i=0;i<MAX_FOOD;i++)spawnFood(i,0,0);
 
-    SceCtrlData pad;
-    unsigned int lastTime = sceKernelGetSystemTimeLow();
+    while(running) {
+        int pressed,boost=0;
+        sceCtrlPeekBufferPositive(&pad,1);
+        pressed=pad.Buttons & ~old.Buttons;
+        frameNo++;
 
-    while (running) {
-        sceCtrlReadBufferPositive(&pad, 1);
-
-        if (pad.Buttons & PSP_CTRL_START) {
-            running = 0;
+        if(screenMode==0) {
+            if((pressed&PSP_CTRL_LEFT)||(pressed&PSP_CTRL_LTRIGGER))
+                selectedSkin=(selectedSkin+7)%8;
+            if((pressed&PSP_CTRL_RIGHT)||(pressed&PSP_CTRL_RTRIGGER))
+                selectedSkin=(selectedSkin+1)%8;
+            if(pressed&PSP_CTRL_CROSS)resetGame();
+        } else if(screenMode==1) {
+            float ax=((float)pad.Lx-128.0f)/128.0f;
+            float ay=((float)pad.Ly-128.0f)/128.0f;
+            if(fabsf(ax)>0.16f || fabsf(ay)>0.16f)
+                steerToward(&snakes[0],snakes[0].x+ax*220.0f,
+                            snakes[0].y+ay*220.0f,0.095f);
+            else {
+                if(pad.Buttons&PSP_CTRL_LEFT)snakes[0].a=wrapAngle(snakes[0].a-0.065f);
+                if(pad.Buttons&PSP_CTRL_RIGHT)snakes[0].a=wrapAngle(snakes[0].a+0.065f);
+                if(pad.Buttons&PSP_CTRL_UP)snakes[0].a=wrapAngle(snakes[0].a-0.045f);
+                if(pad.Buttons&PSP_CTRL_DOWN)snakes[0].a=wrapAngle(snakes[0].a+0.045f);
+            }
+            boost=(pad.Buttons&PSP_CTRL_CROSS)!=0;
+            updateSnake(&snakes[0],1,0,boost);
+            for(i=1;i<MAX_SNAKES;i++)if(snakes[i].alive) {
+                updateBot(&snakes[i],i);
+                updateSnake(&snakes[i],0,i,0);
+            }
+            eatFood();
+            collisions();
+            if(pressed&PSP_CTRL_START)screenMode=3;
+            if(pressed&PSP_CTRL_SELECT)resetGame();
+        } else if(screenMode==2) {
+            if(pressed&PSP_CTRL_CROSS)resetGame();
+            if(pressed&PSP_CTRL_START)screenMode=0;
+        } else if(screenMode==3) {
+            if(pressed&PSP_CTRL_START)screenMode=1;
+            if(pressed&PSP_CTRL_SELECT)resetGame();
         }
 
-        if (pad.Buttons & PSP_CTRL_SELECT) {
-            resetGame();
+        sceGuStart(GU_DIRECT,list);
+        sceGuClearColor(0xFF17121D);
+        sceGuClear(GU_COLOR_BUFFER_BIT|GU_DEPTH_BUFFER_BIT);
+
+        if(screenMode==0) {
+            drawMenu();
+        } else {
+            drawBackground();
+            drawFood();
+            for(i=1;i<MAX_SNAKES;i++)if(snakes[i].alive)drawSnake(&snakes[i],0);
+            drawSnake(&snakes[0],1);
+            sceGuFinish();
+            sceGuSync(0,0);
+            sceDisplayWaitVblankStart();
+            sceGuSwapBuffers();
+            pspDebugScreenClear();
+            drawHud();
+            if(screenMode==2)drawGameOver();
+            if(screenMode==3)drawPause();
+            old=pad;
+            continue;
         }
 
-        unsigned int currentTime = sceKernelGetSystemTimeLow();
-        float dt = (currentTime - lastTime) / 1000000.0f;
-        lastTime = currentTime;
-
-        if (dt > 0.05f) {
-            dt = 0.05f;
-        }
-
-        updateGame(dt, &pad);
-        drawScene();
+        sceGuFinish();
+        sceGuSync(0,0);
+        sceDisplayWaitVblankStart();
+        sceGuSwapBuffers();
+        pspDebugScreenClear();
+        if(screenMode==0) drawMenuText();
+        old=pad;
     }
 
     sceGuTerm();
