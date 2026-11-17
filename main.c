@@ -1,5 +1,5 @@
 /*
- * SLITHER PSP - v2.1
+ * SLITHER PSP - v2.0
  * Homebrew independente para PSP / PPSSPP.
  * Inspirado na mecanica de cobras, comida e crescimento de jogos .io.
  * Controles: analógico/D-pad = virar; X = acelerar; START = pausar/voltar;
@@ -24,9 +24,9 @@ PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
 #define SH 272
 #define BUF_W 512
 #define PI 3.14159265358979323846f
-#define MAX_FOOD 120
-#define MAX_SNAKES 9
-#define PATH_SIZE 512
+#define MAX_FOOD 180
+#define MAX_SNAKES 17
+#define PATH_SIZE 1024
 #define MAX_BODY 105
 #define FOOD_R 3.0f
 
@@ -40,15 +40,21 @@ typedef struct {
 typedef struct { float x, y; int active; unsigned int color; } Food;
 
 static unsigned int __attribute__((aligned(16))) list[262144];
-static Vertex circleVerts[18];
+static Vertex circleVerts[40];
 static Snake snakes[MAX_SNAKES];
 static Food foods[MAX_FOOD];
 static int screenMode = 0; /* 0 menu, 1 jogo, 2 game over, 3 pausa */
 static int selectedSkin = 0;
-static int menuChoice = 0; /* 0 START, 1 SKIN */
+static int menuOption = 0; /* 0 start, 1 skin, 2 nome, 3 idioma */
+static int language = 0; /* 0 portugues, 1 ingles */
+static int nameMode = 0;
+static int nameCursor = 0;
+static char playerName[13] = "PLAYER";
+static const char nameChars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_";
 static int score = 0;
 static int bestScore = 0;
 static int frameNo = 0;
+static int boostFlash = 0;
 static unsigned int skins[] = {
     0xFF32D7FF, 0xFFFF4B4B, 0xFF48E080, 0xFFFFD34D,
     0xFFB56BFF, 0xFFFF8B35, 0xFF45E5D0, 0xFFF4F4F4
@@ -136,11 +142,11 @@ static void initSnake(Snake *s,int bot,int skin,float x,float y) {
     int i;
     memset(s,0,sizeof(Snake));
     s->x=x; s->y=y; s->a=frand(2.0f*PI); s->speed=1.65f;
-    s->length=bot?9:9; s->alive=1; s->bot=bot; s->skin=skin;
+    s->length=bot?12:12; s->alive=1; s->bot=bot; s->skin=skin;
     s->pathAt=0;
     for(i=0;i<PATH_SIZE;i++) {
-        s->path[i].x=x-cosf(s->a)*(float)i*1.45f;
-        s->path[i].y=y-sinf(s->a)*(float)i*1.45f;
+        s->path[i].x=x-cosf(s->a)*(float)i*1.8f;
+        s->path[i].y=y-sinf(s->a)*(float)i*1.8f;
     }
 }
 static void resetGame(void) {
@@ -148,7 +154,7 @@ static void resetGame(void) {
     score=0; frameNo=0;
     initSnake(&snakes[0],0,selectedSkin,0,0);
     for(i=1;i<MAX_SNAKES;i++)
-        initSnake(&snakes[i],1,(i+2)%8,frand(1500)-750,frand(1500)-750);
+        initSnake(&snakes[i],1,(i+2)%8,frand(1900)-950,frand(1900)-950);
     for(i=0;i<MAX_FOOD;i++) spawnFood(i,0,0);
     screenMode=1;
 }
@@ -195,7 +201,7 @@ static void updateSnake(Snake *s,int isPlayer,int index,int boosting) {
     if(isPlayer && boosting && s->length>12 && frameNo%9==0) s->length--;
 }
 static Vec2 getBodyPoint(Snake *s,int segment) {
-    int back=(int)(segment*1.85f);
+    int back=(int)(segment*2.25f);
     int at=(s->pathAt-back)%PATH_SIZE;
     if(at<0)at+=PATH_SIZE;
     return s->path[at];
@@ -206,12 +212,13 @@ static void drawSnake(Snake *s,int isPlayer) {
     for(i=count-1;i>=0;i--) {
         Vec2 p=getBodyPoint(s,i);
         Vec2 q=worldToScreen(p.x,p.y);
-        float r=(i==0)?8.0f:5.7f;
+        float r=(i==0)?9.0f:6.4f;
         unsigned int col=base;
-        if(i%5==0) col=(base&0xFF000000)|(((base&0x00FEFEFE)>>1)+0x00202020);
+        if(i%4==0) col=(base&0xFF000000)|(((base&0x00FEFEFE)>>1)+0x00202020);
         if(q.x>-20&&q.x<SW+20&&q.y>-20&&q.y<SH+20) {
             circle(q.x,q.y,r+1.4f,0xFF08080D);
             circle(q.x,q.y,r,col);
+            if(i>0 && i%4==1) circle(q.x-1.0f,q.y-1.0f,1.5f,0x66FFFFFF);
             if(i==0) {
                 float ex=q.x+cosf(s->a+0.75f)*4.0f;
                 float ey=q.y+sinf(s->a+0.75f)*4.0f;
@@ -223,7 +230,7 @@ static void drawSnake(Snake *s,int isPlayer) {
     }
     if(isPlayer) {
         Vec2 p=worldToScreen(s->x,s->y);
-        circle(p.x,p.y,9.5f,0x5533FFFF);
+        circle(p.x,p.y,13.0f,0x5533FFFF);
     }
 }
 static void drawFood(void) {
@@ -243,7 +250,7 @@ static void eatFood(void) {
         for(j=0;j<MAX_FOOD;j++) if(foods[j].active) {
             if(dist2(snakes[i].x,snakes[i].y,foods[j].x,foods[j].y)<18.0f*18.0f) {
                 foods[j].active=0;
-                addLength(&snakes[i],2);
+                addLength(&snakes[i],1);
                 if(i==0)score+=10;
                 spawnFood(j,snakes[0].x,snakes[0].y);
             }
@@ -268,8 +275,9 @@ static void collisions(void) {
         }
     }
     if(hitOtherBody(&snakes[0],0)) {
-        screenMode=2;
         if(score>bestScore)bestScore=score;
+        screenMode=0; /* ao morrer, volta direto ao menu */
+        nameMode=0;
     }
     for(i=1;i<MAX_SNAKES;i++) if(!snakes[i].alive && frameNo%30==0) {
         int j;
@@ -291,38 +299,37 @@ static void drawHud(void) {
     textAt(2,1,buf);
     sprintf(buf,"TAMANHO: %d",snakes[0].length);
     textAt(2,2,buf);
-    textAt(45,1,"SLITHER PSP");
+    textAt(45,1,playerName);
     textAt(2,32,"X: TURBO   START: PAUSAR");
 }
 static void drawMenu(void) {
     int i;
-    rect(0,0,SW,SH,0xFF111923);
-    /* poucos pontos decorativos para manter o menu leve */
-    for(i=0;i<12;i++) {
-        float x=(float)((i*83+frameNo)%500)-10;
-        float y=(float)((i*47+frameNo/2)%290)-8;
-        circle(x,y,2.0f,0xFF344354);
+    rect(0,0,SW,SH,0xFF11101A);
+    for(i=0;i<16;i++) {
+        float x=(float)((i*71+frameNo)%520)-20;
+        float y=(float)((i*43+frameNo/2)%300)-10;
+        circle(x,y,2.0f,0xFF302B40);
     }
-    circle(240,88,23,0xFF08080D);
-    circle(240,88,19,skins[selectedSkin]);
-    circle(233,82,3,0xFFFFFFFF);
-    circle(247,82,3,0xFFFFFFFF);
-    rect(145,145,190,31,menuChoice==0?0xFF2F9D68:0xFF263544);
-    rect(145,184,190,31,menuChoice==1?0xFF2F9D68:0xFF263544);
+    /* pequenas cobras decorativas */
+    for(i=0;i<7;i++) circle(90.0f+i*9.0f,83.0f+sinf((float)i*0.7f)*5.0f,5.0f,skins[(i+selectedSkin)%8]);
+    for(i=0;i<7;i++) circle(330.0f+i*9.0f,95.0f+cosf((float)i*0.7f)*5.0f,5.0f,skins[(i+3)%8]);
+    rect(112,8,256,30,0xCC080812);
+    rect(105,218,270,34,0xCC080812);
 }
 static void drawMenuText(void) {
-    textCenter(3,"SLITHER PSP");
-    textCenter(6,"SOBREVIVA, COMA E CRESCA!");
-    textCenter(19,menuChoice==0?">  START  <":"START");
-    textCenter(24,menuChoice==1?">  SKIN  <":"SKIN");
-    textCenter(30,"USE AS SETAS E X PARA ESCOLHER");
-}
-static void drawSkinMenu(void) {
-    rect(0,0,SW,SH,0xFF111923);
-    circle(240,91,24,0xFF08080D);
-    circle(240,91,20,skins[selectedSkin]);
-    circle(233,85,3,0xFFFFFFFF);
-    circle(247,85,3,0xFFFFFFFF);
+    char b[80];
+    textCenter(2,"SlitherPSP");
+    textCenter(5, language ? "CHOOSE AN OPTION" : "ESCOLHA UMA OPCAO");
+    sprintf(b,"%c START",menuOption==0?'>':' '); textCenter(12,b);
+    sprintf(b,"%c SKIN: %s",menuOption==1?'>':' ',skinNames[selectedSkin]); textCenter(15,b);
+    sprintf(b,"%c NOME: %s",menuOption==2?'>':' ',playerName); textCenter(18,b);
+    sprintf(b,"%c IDIOMA: %s",menuOption==3?'>':' ',language?"ENGLISH":"PORTUGUES"); textCenter(21,b);
+    if(nameMode) {
+        textCenter(25,language?"EDIT NAME: LEFT/RIGHT, UP/DOWN, X OK":"EDITAR NOME: ESQ/DIR, CIMA/BAIXO, X OK");
+    } else {
+        textCenter(26,language?"ARROWS: SELECT   X: CONFIRM":"SETAS: ESCOLHER   X: CONFIRMAR");
+    }
+    textCenter(29,"Beta V2.2");
 }
 static void drawGameOver(void) {
     rect(75,65,330,140,0xEE080810);
@@ -392,18 +399,40 @@ int main(void) {
         frameNo++;
 
         if(screenMode==0) {
-            if(pressed&PSP_CTRL_UP) menuChoice=0;
-            if(pressed&PSP_CTRL_DOWN) menuChoice=1;
-            if(pressed&PSP_CTRL_CROSS) {
-                if(menuChoice==0) resetGame();
-                else screenMode=4;
+            if(nameMode) {
+                int n=(int)strlen(playerName), ci=0, k;
+                if(pressed&PSP_CTRL_LEFT) { if(nameCursor>0)nameCursor--; }
+                if(pressed&PSP_CTRL_RIGHT) { if(nameCursor<n && n<12)nameCursor++; }
+                if(pressed&PSP_CTRL_UP) {
+                    char c= nameCursor<n ? playerName[nameCursor] : 'A';
+                    for(k=0;nameChars[k];k++)if(nameChars[k]==c){ci=k;break;}
+                    ci=(ci+1)%(int)(sizeof(nameChars)-1);
+                    if(nameCursor<n)playerName[nameCursor]=nameChars[ci];
+                    else if(n<12){playerName[n]=nameChars[ci];playerName[n+1]=0;}
+                }
+                if(pressed&PSP_CTRL_DOWN) {
+                    char c= nameCursor<n ? playerName[nameCursor] : 'A';
+                    for(k=0;nameChars[k];k++)if(nameChars[k]==c){ci=k;break;}
+                    ci=(ci+(int)sizeof(nameChars)-2)%(int)(sizeof(nameChars)-1);
+                    if(nameCursor<n)playerName[nameCursor]=nameChars[ci];
+                    else if(n<12){playerName[n]=nameChars[ci];playerName[n+1]=0;}
+                }
+                if(pressed&PSP_CTRL_CROSS)nameMode=0;
+                if(pressed&PSP_CTRL_CIRCLE) { if(n>0){playerName[n-1]=0;if(nameCursor>n-1)nameCursor=n-1;} }
+            } else {
+                if(pressed&PSP_CTRL_UP)menuOption=(menuOption+3)%4;
+                if(pressed&PSP_CTRL_DOWN)menuOption=(menuOption+1)%4;
+                if((pressed&PSP_CTRL_LEFT)||(pressed&PSP_CTRL_RIGHT)) {
+                    if(menuOption==1)selectedSkin=(selectedSkin+1)%8;
+                    if(menuOption==3)language=1-language;
+                }
+                if(pressed&PSP_CTRL_CROSS) {
+                    if(menuOption==0)resetGame();
+                    else if(menuOption==2){nameMode=1;nameCursor=(int)strlen(playerName);}
+                    else if(menuOption==1)selectedSkin=(selectedSkin+1)%8;
+                    else if(menuOption==3)language=1-language;
+                }
             }
-        } else if(screenMode==4) {
-            if((pressed&PSP_CTRL_LEFT)||(pressed&PSP_CTRL_LTRIGGER))
-                selectedSkin=(selectedSkin+7)%8;
-            if((pressed&PSP_CTRL_RIGHT)||(pressed&PSP_CTRL_RTRIGGER))
-                selectedSkin=(selectedSkin+1)%8;
-            if(pressed&PSP_CTRL_START) screenMode=0;
         } else if(screenMode==1) {
             float ax=((float)pad.Lx-128.0f)/128.0f;
             float ay=((float)pad.Ly-128.0f)/128.0f;
@@ -419,7 +448,7 @@ int main(void) {
             boost=(pad.Buttons&PSP_CTRL_CROSS)!=0;
             updateSnake(&snakes[0],1,0,boost);
             for(i=1;i<MAX_SNAKES;i++)if(snakes[i].alive) {
-                if((frameNo&1)==0) updateBot(&snakes[i],i);
+                updateBot(&snakes[i],i);
                 updateSnake(&snakes[i],0,i,0);
             }
             eatFood();
@@ -440,8 +469,6 @@ int main(void) {
 
         if(screenMode==0) {
             drawMenu();
-        } else if(screenMode==4) {
-            drawSkinMenu();
         } else {
             drawBackground();
             drawFood();
@@ -451,6 +478,7 @@ int main(void) {
             sceGuSync(0,0);
             sceDisplayWaitVblankStart();
             sceGuSwapBuffers();
+            pspDebugScreenSetBase((void*)((frameNo&1)?0:0x88000));
             pspDebugScreenClear();
             drawHud();
             if(screenMode==2)drawGameOver();
@@ -463,16 +491,9 @@ int main(void) {
         sceGuSync(0,0);
         sceDisplayWaitVblankStart();
         sceGuSwapBuffers();
+        pspDebugScreenSetBase((void*)((frameNo&1)?0:0x88000));
         pspDebugScreenClear();
         if(screenMode==0) drawMenuText();
-        if(screenMode==4) {
-            char skinLine[80];
-            textCenter(4,"ESCOLHA SUA SKIN");
-            sprintf(skinLine,"<  %s  >",skinNames[selectedSkin]);
-            textCenter(17,skinLine);
-            textCenter(24,"ESQUERDA / DIREITA: MUDAR");
-            textCenter(28,"START: VOLTAR AO MENU");
-        }
         old=pad;
     }
 
