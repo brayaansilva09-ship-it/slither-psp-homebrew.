@@ -1,9 +1,10 @@
-// SerpentIO v2 - jogo de cobra estilo "io" para PSP (homebrew, PSPSDK)
+// SerpentIO - jogo de cobra estilo "io" para PSP (homebrew, PSPSDK)
 //
-// MENU : cima/baixo escolhe | X confirma | esq/dir troca skin
-//        em NOME: X edita; cima/baixo troca a letra; esq/dir move o cursor; X termina
-// JOGO : analogico (ou direcional) = direcao | X ou R = acelerar | START = menu
-// MORTO: X = jogar de novo | TRIANGULO = menu
+// MENU     : cima/baixo escolhe | X confirma
+//            NOME: X edita; cima/baixo troca a letra; esq/dir move o cursor; X termina
+//            SKIN: abre a grade de skins | CONFIG: idioma, bots, comida, nomes
+// JOGO     : analogico (ou direcional) = direcao | X ou R = acelerar | START = menu
+// MORREU   : mostra o resultado e volta ao menu
 
 #include <pspkernel.h>
 #include <pspdisplay.h>
@@ -32,7 +33,8 @@ PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER);
 #define FOOD_AMBIENT 1300
 #define SPACING 6.0f
 #define NAMELEN 10
-#define NSKIN 24
+#define NSKIN 32 // precisa ser multiplo de 8 (grade 8 colunas)
+#define SKIN_COLS 8
 #define PI 3.14159265f
 
 #define RGB(r, g, b) (0xFF000000u | ((b) << 16) | ((g) << 8) | (r))
@@ -61,11 +63,51 @@ typedef struct {
 typedef struct {
     char magic[4];
     char name[NAMELEN + 1];
-    int skin;
-    int best;
+    int skin, best, lang, bots, food, names;
 } Save;
 
-enum { ST_MENU, ST_PLAY };
+enum { ST_MENU, ST_PLAY, ST_SKINS, ST_SETTINGS };
+
+// ------------------------------------------------------------ textos (3 idiomas)
+enum {
+    S_PLAY, S_NAME, S_SKIN, S_SETTINGS, S_RECORD, S_HELP_MENU, S_HELP_EDIT, S_LEADER,
+    S_LENGTH, S_RANK, S_KILLS, S_DIED, S_BACKMENU, S_LANG, S_BOTS, S_FOOD, S_NAMES,
+    S_BACK, S_HELP_SKINS, S_HELP_SET, S_LOW, S_NORMAL, S_HIGH, S_ON, S_OFF, NSTR
+};
+
+static const char *T[NSTR][3] = {
+    {"JOGAR", "PLAY", "JUGAR"},
+    {"NOME", "NAME", "NOMBRE"},
+    {"SKIN", "SKIN", "SKIN"},
+    {"CONFIG", "SETTINGS", "AJUSTES"},
+    {"RECORDE", "BEST", "RECORD"},
+    {"CIMA/BAIXO ESCOLHER   X CONFIRMAR", "UP/DOWN SELECT   X CONFIRM",
+     "ARRIBA/ABAJO ELEGIR   X OK"},
+    {"CIMA/BAIXO LETRA  ESQ/DIR POS  X OK", "UP/DOWN LETTER  L/R MOVE  X OK",
+     "ARRIBA/ABAJO LETRA  IZQ/DER  X OK"},
+    {"PLACAR", "LEADERBOARD", "CLASIF."},
+    {"TAMANHO", "LENGTH", "LONGITUD"},
+    {"RANK", "RANK", "RANGO"},
+    {"ABATES", "KILLS", "BAJAS"},
+    {"VOCE MORREU", "YOU DIED", "HAS MUERTO"},
+    {"VOLTANDO AO MENU...", "BACK TO MENU...", "VOLVIENDO AL MENU..."},
+    {"IDIOMA", "LANGUAGE", "IDIOMA"},
+    {"BOTS", "BOTS", "BOTS"},
+    {"COMIDA", "FOOD", "COMIDA"},
+    {"NOMES", "NAMES", "NOMBRES"},
+    {"VOLTAR", "BACK", "VOLVER"},
+    {"DIRECIONAL MOVER  X OK  O VOLTAR", "D-PAD MOVE  X OK  O BACK", "CRUZ MOVER  X OK  O VOLVER"},
+    {"CIMA/BAIXO ESCOLHER  ESQ/DIR MUDAR", "UP/DOWN SELECT  L/R CHANGE",
+     "ARRIBA/ABAJO  IZQ/DER CAMBIAR"},
+    {"POUCA", "LOW", "POCA"},
+    {"NORMAL", "NORMAL", "NORMAL"},
+    {"MUITA", "HIGH", "MUCHA"},
+    {"SIM", "ON", "SI"},
+    {"NAO", "OFF", "NO"},
+};
+static int lang = 0;
+#define TXT(id) (T[id][lang])
+static const char *langNames[3] = {"PORTUGUES", "ENGLISH", "ESPANOL"};
 
 // ------------------------------------------------------------ dados
 static const Skin skins[NSKIN] = {
@@ -94,6 +136,14 @@ static const Skin skins[NSKIN] = {
     {"OCEANO", 3, {RGB(20, 90, 170), RGB(40, 170, 200), RGB(150, 230, 230)}, 3},
     {"LAVA", 3, {RGB(90, 20, 20), RGB(230, 70, 30), RGB(255, 190, 50)}, 3},
     {"FLORESTA", 3, {RGB(20, 90, 40), RGB(70, 150, 60), RGB(150, 200, 80)}, 3},
+    {"AURORA", 3, {RGB(70, 120, 255), RGB(150, 90, 255), RGB(255, 120, 200)}, 3},
+    {"AREIA", 2, {RGB(235, 200, 140), RGB(200, 160, 100)}, 3},
+    {"LIMAO", 2, {RGB(200, 255, 70), RGB(255, 240, 80)}, 3},
+    {"TURQUESA", 2, {RGB(30, 200, 190), RGB(20, 140, 150)}, 3},
+    {"UVA", 2, {RGB(120, 50, 190), RGB(80, 30, 140)}, 3},
+    {"CEREJA", 2, {RGB(210, 30, 70), RGB(255, 120, 150)}, 2},
+    {"MENTA", 2, {RGB(150, 255, 200), RGB(90, 210, 160)}, 3},
+    {"CARVAO", 2, {RGB(150, 150, 160), RGB(70, 70, 85)}, 3},
 };
 
 static const char *botNames[] = {
@@ -118,14 +168,23 @@ static int deadTimer = 0;
 static int playerKills = 0;
 
 static char playerName[NAMELEN + 1] = "PLAYER    ";
-static int skinSel = 0;
+static int skinSel = 0, skinCursor = 0;
 static int menuSel = 0, editing = 0, cursorPos = 0;
+
+// configuracoes
+static int botCount = 22; // 0..NSNAKE-1
+static int foodLevel = 1; // 0 pouca, 1 normal, 2 muita
+static int showNames = 1;
+static int ambientFood = FOOD_AMBIENT;
+static int setSel = 0;
+static const int foodPct[3] = {60, 100, 130};
 
 static float camX = 0, camY = 0, zoom = 1.0f;
 #define SX(wx) ((int)(((wx) - camX) * zoom + SW / 2))
 #define SY(wy) ((int)(((wy) - camY) * zoom + SH / 2))
 
 static float frand(void) { return (float)rand() / (float)RAND_MAX; }
+static void applyFood(void) { ambientFood = FOOD_AMBIENT * foodPct[foodLevel] / 100; }
 
 // ------------------------------------------------------------ desenho
 static void fillRect(int x, int y, int w, int h, unsigned int c) {
@@ -137,6 +196,19 @@ static void fillRect(int x, int y, int w, int h, unsigned int c) {
     for (int j = y; j < y1; j++) {
         unsigned int *row = draw + j * BUFW;
         for (int i = x; i < x1; i++) row[i] = c;
+    }
+}
+
+// escurece uma area (painel translucido)
+static void dimRect(int x, int y, int w, int h) {
+    int x1 = x + w, y1 = y + h;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x1 > SW) x1 = SW;
+    if (y1 > SH) y1 = SH;
+    for (int j = y; j < y1; j++) {
+        unsigned int *row = draw + j * BUFW;
+        for (int i = x; i < x1; i++) row[i] = ((row[i] >> 1) & 0x007F7F7Fu) | 0xFF000000u;
     }
 }
 
@@ -161,6 +233,16 @@ static unsigned int shade(unsigned int c, int num, int den) {
     if (g > 255) g = 255;
     if (b > 255) b = 255;
     return RGB(r, g, b);
+}
+
+// segmento do corpo com contorno escuro (efeito de escamas)
+static void drawSeg(int x, int y, int r, unsigned int c) {
+    if (r >= 4) {
+        fillCircle(x, y, r, shade(c, 2, 3));
+        fillCircle(x, y, r - (r >= 7 ? 2 : 1), c);
+    } else {
+        fillCircle(x, y, r, c);
+    }
 }
 
 // fonte 3x5 (cada linha = 3 bits)
@@ -214,14 +296,22 @@ static void drawTextC(const char *t, int cx, int y, int sc, unsigned int c) {
     drawText(t, cx - (int)strlen(t) * 4 * sc / 2, y, sc, c);
 }
 
+static void drawTextR(const char *t, int rx, int y, int sc, unsigned int c) {
+    drawText(t, rx - (int)strlen(t) * 4 * sc, y, sc, c);
+}
+
 // ------------------------------------------------------------ salvar/carregar
 static void saveData(void) {
     Save sv;
     memset(&sv, 0, sizeof sv);
-    memcpy(sv.magic, "SPT1", 4);
+    memcpy(sv.magic, "SPT2", 4);
     memcpy(sv.name, playerName, NAMELEN + 1);
     sv.skin = skinSel;
     sv.best = best;
+    sv.lang = lang;
+    sv.bots = botCount;
+    sv.food = foodLevel;
+    sv.names = showNames;
     SceUID fd = sceIoOpen("serpentio.sav", PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
     if (fd >= 0) {
         sceIoWrite(fd, &sv, sizeof sv);
@@ -235,12 +325,16 @@ static void loadData(void) {
     if (fd < 0) return;
     int n = sceIoRead(fd, &sv, sizeof sv);
     sceIoClose(fd);
-    if (n != (int)sizeof sv || memcmp(sv.magic, "SPT1", 4) != 0) return;
+    if (n != (int)sizeof sv || memcmp(sv.magic, "SPT2", 4) != 0) return;
     for (int i = 0; i < NAMELEN; i++)
         playerName[i] = (sv.name[i] != 0 && strchr(CHARS, sv.name[i])) ? sv.name[i] : ' ';
     playerName[NAMELEN] = 0;
     if (sv.skin >= 0 && sv.skin < NSKIN) skinSel = sv.skin;
     if (sv.best > 0 && sv.best < 1000000) best = sv.best;
+    if (sv.lang >= 0 && sv.lang < 3) lang = sv.lang;
+    if (sv.bots >= 0 && sv.bots < NSNAKE) botCount = sv.bots;
+    if (sv.food >= 0 && sv.food < 3) foodLevel = sv.food;
+    showNames = sv.names ? 1 : 0;
 }
 
 static void trimName(char *dst) {
@@ -297,7 +391,7 @@ static void dropFood(float x, float y, int value, unsigned int col) {
 }
 
 static void respawn(Snake *s, int isPlayer) {
-    float x = WORLD / 2, y = WORLD / 2;
+    float x = WR, y = WR;
     for (int t = 0; t < 8; t++) {
         float a = frand() * 2 * PI, d = sqrtf(frand()) * (WR - 350);
         x = WR + cosf(a) * d;
@@ -552,12 +646,16 @@ static void collisions(void) {
 
 static void startGame(void) {
     memset(foods, 0, sizeof foods);
-    for (int i = 0; i < FOOD_AMBIENT; i++) spawnAmbient(&foods[i]);
+    applyFood();
+    for (int i = 0; i < ambientFood; i++) spawnAmbient(&foods[i]);
     trimName(snakes[0].name);
     snakes[0].skin = skinSel;
     for (int i = 0; i < NSNAKE; i++) snakes[i].alive = 0;
     respawn(&snakes[0], 1);
-    for (int i = 1; i < NSNAKE; i++) respawn(&snakes[i], 0);
+    for (int i = 1; i < NSNAKE; i++) {
+        if (i <= botCount) respawn(&snakes[i], 0);
+        else snakes[i].respawnTimer = 0x7fffffff;
+    }
     zoom = 1.0f;
     playerKills = 0;
     state = ST_PLAY;
@@ -588,7 +686,7 @@ static void gameUpdate(const SceCtrlData *pad, unsigned int pressed) {
     for (int i = 0; i < NSNAKE; i++) {
         Snake *s = &snakes[i];
         if (!s->alive) {
-            if (i > 0 && --s->respawnTimer <= 0) respawn(s, 0);
+            if (i > 0 && i <= botCount && --s->respawnTimer <= 0) respawn(s, 0);
             continue;
         }
         if (i > 0 && ((frame + i) % 3 == 0)) botThink(i);
@@ -604,7 +702,7 @@ static void gameUpdate(const SceCtrlData *pad, unsigned int pressed) {
 
     int active = 0;
     for (int i = 0; i < FOOD_MAX; i++) active += foods[i].active;
-    for (int n = 0; active < FOOD_AMBIENT && n < 2; n++)
+    for (int n = 0; active < ambientFood && n < 2; n++)
         for (int i = 0; i < FOOD_MAX; i++)
             if (!foods[i].active) {
                 spawnAmbient(&foods[i]);
@@ -613,9 +711,43 @@ static void gameUpdate(const SceCtrlData *pad, unsigned int pressed) {
             }
 }
 
-// ------------------------------------------------------------ menu
-static void menuUpdate(const SceCtrlData *pad, unsigned int pressed) {
-    (void)pad;
+// ------------------------------------------------------------ cenas de fundo / previas
+static void drawMenuBackground(void) {
+    fillRect(0, 0, SW, SH, RGB(14, 16, 26));
+    for (int r = 0; r < 7; r++)
+        for (int c = 0; c < 9; c++) {
+            int x = c * 60 + ((r & 1) ? 30 : 0), y = r * 45 + 10;
+            fillCircle(x, y, 3, RGB(26, 30, 46));
+        }
+    for (int i = 0; i < 40; i++) {
+        int x = (i * 137 + frame / (2 + i % 3)) % SW, y = (i * 71) % SH;
+        unsigned int c = (i % 3 == 0) ? RGB(255, 120, 120) : (i % 3 == 1) ? RGB(110, 220, 255)
+                                                                         : RGB(140, 255, 150);
+        fillCircle(x, y, 5, shade(c, 1, 5));
+        fillCircle(x, y, 3, shade(c, 3, 4));
+    }
+}
+
+// cobra de previa (cabeca na direita)
+static void drawMiniSnake(int skin, int cx, int cy, int r, int n, float sp, float phase) {
+    float amp = r * 1.4f;
+    for (int k = n - 1; k >= 0; k--) {
+        float x = cx + ((n - 1) * 0.5f - k) * sp;
+        float y = cy + sinf(phase + k * 0.45f) * amp * (r >= 7 ? 1.0f : 0.5f);
+        drawSeg((int)x, (int)y, r, skinColor(skin, k));
+        if (k == 0 && r >= 4) {
+            int er = r / 3 + 1;
+            int ex = (int)x + r / 3;
+            fillCircle(ex, (int)y - r / 2, er, RGB(255, 255, 255));
+            fillCircle(ex, (int)y + r / 2, er, RGB(255, 255, 255));
+            fillCircle(ex + 1, (int)y - r / 2, er / 2 + 0, RGB(0, 0, 0));
+            fillCircle(ex + 1, (int)y + r / 2, er / 2 + 0, RGB(0, 0, 0));
+        }
+    }
+}
+
+// ------------------------------------------------------------ menu principal
+static void menuUpdate(unsigned int pressed) {
     if (editing) {
         if (pressed & PSP_CTRL_LEFT) { if (cursorPos > 0) cursorPos--; }
         if (pressed & PSP_CTRL_RIGHT) { if (cursorPos < NAMELEN - 1) cursorPos++; }
@@ -631,64 +763,146 @@ static void menuUpdate(const SceCtrlData *pad, unsigned int pressed) {
         }
         return;
     }
-    if (pressed & PSP_CTRL_UP) menuSel = (menuSel + 2) % 3;
-    if (pressed & PSP_CTRL_DOWN) menuSel = (menuSel + 1) % 3;
-    if (menuSel == 2) {
-        if (pressed & PSP_CTRL_LEFT) { skinSel = (skinSel + NSKIN - 1) % NSKIN; saveData(); }
-        if (pressed & (PSP_CTRL_RIGHT | PSP_CTRL_CROSS)) { skinSel = (skinSel + 1) % NSKIN; saveData(); }
-    }
+    if (pressed & PSP_CTRL_UP) menuSel = (menuSel + 3) % 4;
+    if (pressed & PSP_CTRL_DOWN) menuSel = (menuSel + 1) % 4;
     if (pressed & PSP_CTRL_CROSS) {
         if (menuSel == 0) startGame();
         else if (menuSel == 1) editing = 1;
+        else if (menuSel == 2) { skinCursor = skinSel; state = ST_SKINS; }
+        else { setSel = 0; state = ST_SETTINGS; }
     }
 }
 
 static void renderMenu(void) {
-    fillRect(0, 0, SW, SH, RGB(14, 16, 26));
-    for (int i = 0; i < 50; i++) {
-        int x = (i * 137 + frame / (2 + i % 3)) % SW, y = (i * 71) % SH;
-        unsigned int c = (i % 2) ? RGB(40, 46, 70) : RGB(60, 80, 70);
-        fillCircle(x, y, 2 + (i % 3), c);
-    }
-    drawTextC("SERPENTIO", SW / 2, 16, 6, RGB(90, 255, 140));
+    drawMenuBackground();
+    drawTextC("SERPENTIO", SW / 2, 14, 6, RGB(90, 255, 140));
 
     unsigned int sel = RGB(255, 230, 80), norm = RGB(190, 195, 210);
-    char buf[40];
+    char buf[48];
+    int y0 = 80, dy = 27;
 
-    drawText(menuSel == 0 ? "> JOGAR" : "  JOGAR", 90, 90, 3, menuSel == 0 ? sel : norm);
+    drawText(menuSel == 0 ? "> " : "  ", 90, y0, 3, sel);
+    drawText(TXT(S_PLAY), 114, y0, 3, menuSel == 0 ? sel : norm);
 
     unsigned int nc = (menuSel == 1) ? sel : norm;
-    drawText(menuSel == 1 ? "> NOME" : "  NOME", 90, 118, 3, nc);
+    drawText(menuSel == 1 ? "> " : "  ", 90, y0 + dy, 3, sel);
+    drawText(TXT(S_NAME), 114, y0 + dy, 3, nc);
     for (int i = 0; i < NAMELEN; i++) {
         char one[2] = {playerName[i], 0};
-        drawText(one, 250 + i * 12, 118, 3, editing ? RGB(255, 255, 255) : nc);
+        drawText(one, 250 + i * 12, y0 + dy, 3, editing ? RGB(255, 255, 255) : nc);
     }
     if (editing && (frame / 20) % 2 == 0)
-        fillRect(250 + cursorPos * 12, 118 + 17, 9, 3, RGB(255, 230, 80));
+        fillRect(250 + cursorPos * 12, y0 + dy + 17, 9, 3, RGB(255, 230, 80));
 
-    snprintf(buf, sizeof buf, "< %s >", skins[skinSel].name);
-    drawText(menuSel == 2 ? "> SKIN" : "  SKIN", 90, 146, 3, menuSel == 2 ? sel : norm);
-    drawText(buf, 250, 146, 3, menuSel == 2 ? sel : norm);
+    drawText(menuSel == 2 ? "> " : "  ", 90, y0 + 2 * dy, 3, sel);
+    drawText(TXT(S_SKIN), 114, y0 + 2 * dy, 3, menuSel == 2 ? sel : norm);
+    drawText(skins[skinSel].name, 250, y0 + 2 * dy, 3, menuSel == 2 ? sel : norm);
 
-    // cobra de previa com a skin escolhida
-    for (int i = 44; i >= 0; i--) {
-        float x = 400.0f - i * 6.5f;
-        float y = 213.0f + sinf(frame * 0.06f + i * 0.35f) * 14.0f;
-        fillCircle((int)x, (int)y, 8, skinColor(skinSel, i));
+    drawText(menuSel == 3 ? "> " : "  ", 90, y0 + 3 * dy, 3, sel);
+    drawText(TXT(S_SETTINGS), 114, y0 + 3 * dy, 3, menuSel == 3 ? sel : norm);
+
+    drawMiniSnake(skinSel, SW / 2, 206, 8, 45, 6.5f, frame * 0.06f);
+
+    snprintf(buf, sizeof buf, "%s: %d", TXT(S_RECORD), best);
+    drawText(buf, 8, 8, 2, RGB(255, 230, 80));
+    drawTextC(editing ? TXT(S_HELP_EDIT) : TXT(S_HELP_MENU), SW / 2, 241, 2,
+              RGB(140, 145, 165));
+    drawTextC("SlitherPSP v3 beta", SW / 2, 262, 1, RGB(95, 100, 120));
+}
+
+// ------------------------------------------------------------ menu de skins (grade)
+static void skinsUpdate(unsigned int pressed) {
+    if (pressed & PSP_CTRL_LEFT) skinCursor = (skinCursor + NSKIN - 1) % NSKIN;
+    if (pressed & PSP_CTRL_RIGHT) skinCursor = (skinCursor + 1) % NSKIN;
+    if (pressed & PSP_CTRL_UP)
+        skinCursor = (skinCursor >= SKIN_COLS) ? skinCursor - SKIN_COLS : skinCursor + NSKIN - SKIN_COLS;
+    if (pressed & PSP_CTRL_DOWN)
+        skinCursor = (skinCursor + SKIN_COLS < NSKIN) ? skinCursor + SKIN_COLS : skinCursor - (NSKIN - SKIN_COLS);
+    if (pressed & PSP_CTRL_CROSS) {
+        skinSel = skinCursor;
+        saveData();
+        state = ST_MENU;
+    }
+    if (pressed & (PSP_CTRL_CIRCLE | PSP_CTRL_TRIANGLE)) state = ST_MENU;
+}
+
+static void renderSkins(void) {
+    drawMenuBackground();
+    drawText(TXT(S_SKIN), 16, 8, 3, RGB(90, 255, 140));
+    drawTextR(TXT(S_HELP_SKINS), SW - 16, 14, 1, RGB(140, 145, 165));
+
+    int x0 = 16, y0 = 32, cw = 56, ch = 52;
+    int rows = NSKIN / SKIN_COLS;
+    for (int i = 0; i < NSKIN; i++) {
+        int cx = x0 + (i % SKIN_COLS) * cw, cy = y0 + (i / SKIN_COLS) * ch;
+        int isSel = (i == skinCursor);
+        if (isSel) fillRect(cx + 1, cy + 1, cw - 2, ch - 2, RGB(255, 230, 80));
+        fillRect(cx + 3, cy + 3, cw - 6, ch - 6, isSel ? RGB(40, 46, 70) : RGB(22, 26, 40));
+        drawMiniSnake(i, cx + cw / 2, cy + ch / 2, 5, 6, 6.5f, isSel ? frame * 0.12f : 0.0f);
+        if (i == skinSel) fillCircle(cx + cw - 9, cy + 9, 3, RGB(90, 255, 140));
+    }
+    (void)rows;
+    drawTextC(skins[skinCursor].name, SW / 2, 246, 3, RGB(255, 230, 80));
+}
+
+// ------------------------------------------------------------ configuracoes
+static void settingsUpdate(unsigned int pressed) {
+    if (pressed & PSP_CTRL_UP) setSel = (setSel + 4) % 5;
+    if (pressed & PSP_CTRL_DOWN) setSel = (setSel + 1) % 5;
+    int d = 0;
+    if (pressed & PSP_CTRL_RIGHT) d = 1;
+    if (pressed & PSP_CTRL_LEFT) d = -1;
+    if ((pressed & PSP_CTRL_CROSS) && setSel < 4) d = 1;
+    if (d) {
+        if (setSel == 0) lang = (lang + d + 3) % 3;
+        else if (setSel == 1) {
+            botCount += d;
+            if (botCount < 0) botCount = NSNAKE - 1;
+            if (botCount > NSNAKE - 1) botCount = 0;
+        } else if (setSel == 2) {
+            foodLevel = (foodLevel + d + 3) % 3;
+            applyFood();
+        } else if (setSel == 3) showNames ^= 1;
+    }
+    if (setSel == 1) {
+        if (pressed & PSP_CTRL_LTRIGGER) botCount = botCount - 5 < 0 ? 0 : botCount - 5;
+        if (pressed & PSP_CTRL_RTRIGGER)
+            botCount = botCount + 5 > NSNAKE - 1 ? NSNAKE - 1 : botCount + 5;
+    }
+    if (((pressed & PSP_CTRL_CROSS) && setSel == 4) ||
+        (pressed & (PSP_CTRL_CIRCLE | PSP_CTRL_TRIANGLE))) {
+        saveData();
+        state = ST_MENU;
+    }
+}
+
+static void renderSettings(void) {
+    drawMenuBackground();
+    drawText(TXT(S_SETTINGS), 16, 8, 3, RGB(90, 255, 140));
+
+    unsigned int sel = RGB(255, 230, 80), norm = RGB(190, 195, 210);
+    char buf[32];
+    int y0 = 58, dy = 32;
+    const char *labels[4] = {TXT(S_LANG), TXT(S_BOTS), TXT(S_FOOD), TXT(S_NAMES)};
+    for (int i = 0; i < 4; i++) {
+        unsigned int c = (setSel == i) ? sel : norm;
+        int y = y0 + i * dy;
+        if (setSel == i) dimRect(40, y - 5, SW - 80, 26);
+        drawText(setSel == i ? "> " : "  ", 50, y, 3, sel);
+        drawText(labels[i], 74, y, 3, c);
+        if (i == 0) snprintf(buf, sizeof buf, "< %s >", langNames[lang]);
+        else if (i == 1) snprintf(buf, sizeof buf, "< %d >", botCount);
+        else if (i == 2) snprintf(buf, sizeof buf, "< %s >", TXT(S_LOW + foodLevel));
+        else snprintf(buf, sizeof buf, "< %s >", TXT(showNames ? S_ON : S_OFF));
+        drawText(buf, 250, y, 3, c);
     }
     {
-        float hy = 213.0f + sinf(frame * 0.06f) * 14.0f;
-        fillCircle(404, (int)hy - 4, 3, RGB(255, 255, 255));
-        fillCircle(404, (int)hy + 4, 3, RGB(255, 255, 255));
-        fillCircle(405, (int)hy - 4, 1, RGB(0, 0, 0));
-        fillCircle(405, (int)hy + 4, 1, RGB(0, 0, 0));
+        int y = y0 + 4 * dy;
+        if (setSel == 4) dimRect(40, y - 5, SW - 80, 26);
+        drawText(setSel == 4 ? "> " : "  ", 50, y, 3, sel);
+        drawText(TXT(S_BACK), 74, y, 3, setSel == 4 ? sel : norm);
     }
-
-    snprintf(buf, sizeof buf, "RECORDE: %d", best);
-    drawText(buf, 8, 8, 2, RGB(255, 230, 80));
-    drawTextC(editing ? "CIMA/BAIXO LETRA  ESQ/DIR POS  X OK"
-                      : "CIMA/BAIXO ESCOLHER   X CONFIRMAR",
-              SW / 2, 252, 2, RGB(140, 145, 165));
+    drawTextC(TXT(S_HELP_SET), SW / 2, 250, 2, RGB(140, 145, 165));
 }
 
 // ------------------------------------------------------------ render do jogo
@@ -705,7 +919,7 @@ static void drawSnake(const Snake *s) {
     for (int i = s->len - 1; i >= 0; i--) {
         int sx = SX(s->x[i]), sy = SY(s->y[i]);
         if (sx < -r || sx > SW + r || sy < -r || sy > SH + r) continue;
-        fillCircle(sx, sy, r, skinColor(s->skin, i));
+        drawSeg(sx, sy, r, skinColor(s->skin, i));
     }
     int hx = SX(s->x[0]), hy = SY(s->y[0]);
     if (hx < -20 || hx > SW + 20 || hy < -20 || hy > SH + 20) return;
@@ -719,19 +933,21 @@ static void drawSnake(const Snake *s) {
     int px = (int)(cosf(s->ang) * er * 0.4f), py = (int)(sinf(s->ang) * er * 0.4f);
     fillCircle(ex0 + (int)ex + px, ey0 + (int)ey + py, pr, RGB(0, 0, 0));
     fillCircle(ex0 - (int)ex + px, ey0 - (int)ey + py, pr, RGB(0, 0, 0));
-    drawTextC(s->name, hx, hy + r + 5, 1, RGB(210, 215, 230));
+    if (showNames) drawTextC(s->name, hx, hy + r + 5, 1, RGB(210, 215, 230));
 }
 
 static void renderGame(void) {
     Snake *p = &snakes[0];
-    char buf[40];
+    char buf[48];
     camX = p->x[0];
     camY = p->y[0];
     float zt = 1.0f / (1.0f + (p->len - 10) * 0.003f);
     if (zt < 0.55f) zt = 0.55f;
     zoom += (zt - zoom) * 0.04f;
 
+    // fundo: borda vermelha brilhante + arena escura
     fillRect(0, 0, SW, SH, RGB(120, 28, 28));
+    fillCircle(SX(WR), SY(WR), (int)(WR * zoom) + 8, RGB(210, 55, 55));
     fillCircle(SX(WR), SY(WR), (int)(WR * zoom), RGB(18, 20, 30));
 
     // grade hexagonal de pontos
@@ -765,7 +981,7 @@ static void renderGame(void) {
         if (snakes[k].alive) drawSnake(&snakes[k]);
     if (p->alive) drawSnake(p);
 
-    // placar
+    // placar (painel translucido)
     int order[NSNAKE], n = 0;
     for (int i = 0; i < NSNAKE; i++) {
         if (!snakes[i].alive) continue;
@@ -777,7 +993,8 @@ static void renderGame(void) {
         order[j] = i;
     }
     int lx = SW - 138;
-    drawText("PLACAR", lx, 6, 2, RGB(255, 255, 255));
+    dimRect(lx - 6, 2, SW - (lx - 6) - 2, 142);
+    drawText(TXT(S_LEADER), lx, 6, 2, RGB(255, 255, 255));
     for (int i = 0; i < n && i < 10; i++) {
         Snake *s = &snakes[order[i]];
         unsigned int c = (order[i] == 0) ? RGB(255, 230, 80) : RGB(215, 220, 232);
@@ -790,11 +1007,12 @@ static void renderGame(void) {
     int rank = 1;
     for (int i = 1; i < NSNAKE; i++)
         if (snakes[i].alive && snakes[i].score > p->score) rank++;
-    snprintf(buf, sizeof buf, "TAMANHO: %d", displayLen(p));
+    dimRect(4, SH - 52, 140, 46);
+    snprintf(buf, sizeof buf, "%s: %d", TXT(S_LENGTH), displayLen(p));
     drawText(buf, 8, SH - 34, 2, RGB(255, 255, 255));
-    snprintf(buf, sizeof buf, "ABATES: %d", playerKills);
+    snprintf(buf, sizeof buf, "%s: %d", TXT(S_KILLS), playerKills);
     drawText(buf, 8, SH - 48, 2, RGB(200, 205, 220));
-    snprintf(buf, sizeof buf, "RANK: %d/%d", rank, n > 0 ? n : 1);
+    snprintf(buf, sizeof buf, "%s: %d/%d", TXT(S_RANK), rank, n > 0 ? n : 1);
     drawText(buf, 8, SH - 20, 2, RGB(200, 205, 220));
 
     // minimapa
@@ -816,14 +1034,14 @@ static void renderGame(void) {
     if (!p->alive) {
         fillRect(100, 70, 280, 130, RGB(20, 20, 32));
         fillRect(100, 70, 280, 3, RGB(200, 50, 50));
-        drawTextC("VOCE MORREU", SW / 2, 86, 4, RGB(255, 90, 90));
-        snprintf(buf, sizeof buf, "TAMANHO: %d", displayLen(p));
+        drawTextC(TXT(S_DIED), SW / 2, 86, 4, RGB(255, 90, 90));
+        snprintf(buf, sizeof buf, "%s: %d", TXT(S_LENGTH), displayLen(p));
         drawTextC(buf, SW / 2, 124, 2, RGB(255, 255, 255));
-        snprintf(buf, sizeof buf, "RECORDE: %d", best);
+        snprintf(buf, sizeof buf, "%s: %d", TXT(S_RECORD), best);
         drawTextC(buf, SW / 2, 142, 2, RGB(255, 230, 80));
-        snprintf(buf, sizeof buf, "ABATES: %d", playerKills);
+        snprintf(buf, sizeof buf, "%s: %d", TXT(S_KILLS), playerKills);
         drawTextC(buf, SW / 2, 160, 2, RGB(200, 205, 220));
-        drawTextC("VOLTANDO AO MENU...", SW / 2, 180, 2, RGB(190, 195, 210));
+        drawTextC(TXT(S_BACKMENU), SW / 2, 180, 2, RGB(190, 195, 210));
     }
 }
 
@@ -865,6 +1083,7 @@ int main(void) {
         snakes[i].name[NAMELEN] = 0;
     }
     loadData();
+    applyFood();
 
     SceCtrlData pad;
     unsigned int prev = 0;
@@ -874,12 +1093,16 @@ int main(void) {
         prev = pad.Buttons;
         frame++;
 
-        if (state == ST_MENU) menuUpdate(&pad, pressed);
+        if (state == ST_MENU) menuUpdate(pressed);
+        else if (state == ST_SKINS) skinsUpdate(pressed);
+        else if (state == ST_SETTINGS) settingsUpdate(pressed);
         else gameUpdate(&pad, pressed);
 
         int back = 1 - frameIdx;
         draw = (unsigned int *)(vbase + back * FRAME_BYTES);
         if (state == ST_MENU) renderMenu();
+        else if (state == ST_SKINS) renderSkins();
+        else if (state == ST_SETTINGS) renderSettings();
         else renderGame();
 
         sceKernelDcacheWritebackAll();
