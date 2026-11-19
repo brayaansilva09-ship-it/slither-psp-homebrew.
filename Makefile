@@ -5,7 +5,7 @@ CFLAGS = -O2 -G0 -Wall
 CXXFLAGS = $(CFLAGS) -fno-exceptions -fno-rtti
 ASFLAGS = $(CFLAGS)
 
-LIBS = -lpspgu -lpspgum -lpspdisplay -lpspge -lpspctrl -lm
+LIBS = -lpspge -lpspdisplay -lpspctrl -lpsppower -lm
 BUILD_PRX = 1
 EXTRA_TARGETS = EBOOT.PBP
 PSP_EBOOT_TITLE = Slither PSP Homebrew
