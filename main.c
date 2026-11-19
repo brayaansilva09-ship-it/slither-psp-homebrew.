@@ -25,6 +25,7 @@ PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER);
 #define FRAME_BYTES (BUFW * SH * 4)
 
 #define WORLD 3000.0f
+#define WR (WORLD / 2.0f) // arena redonda: centro (WR,WR), raio WR
 #define MAXSEG 240
 #define NSNAKE 12
 #define FOOD_MAX 1000
@@ -46,7 +47,7 @@ typedef struct {
 
 typedef struct {
     float x[MAXSEG], y[MAXSEG];
-    int len, alive, skin, boost, tick, respawnTimer;
+    int len, alive, skin, boost, tick, respawnTimer, burst, cool;
     float ang, desired, score, rad, wander, aggr;
     char name[NAMELEN + 1];
 } Snake;
@@ -265,7 +266,8 @@ static void spawnAmbient(Food *f) {
     static const unsigned int pal[8] = {
         RGB(255, 90, 90), RGB(90, 210, 255), RGB(130, 255, 130), RGB(255, 225, 70),
         RGB(255, 150, 50), RGB(205, 110, 255), RGB(255, 110, 205), RGB(70, 255, 210)};
-    spawnFood(f, v, 20 + frand() * (WORLD - 40), 20 + frand() * (WORLD - 40), pal[rand() % 8]);
+    float a = frand() * 2 * PI, d = sqrtf(frand()) * (WR - 30);
+    spawnFood(f, v, WR + cosf(a) * d, WR + sinf(a) * d, pal[rand() % 8]);
 }
 
 static void dropFood(float x, float y, int value, unsigned int col) {
@@ -279,8 +281,9 @@ static void dropFood(float x, float y, int value, unsigned int col) {
 static void respawn(Snake *s, int isPlayer) {
     float x = WORLD / 2, y = WORLD / 2;
     for (int t = 0; t < 8; t++) {
-        x = 250 + frand() * (WORLD - 500);
-        y = 250 + frand() * (WORLD - 500);
+        float a = frand() * 2 * PI, d = sqrtf(frand()) * (WR - 350);
+        x = WR + cosf(a) * d;
+        y = WR + sinf(a) * d;
         int ok = 1;
         for (int k = 0; k < NSNAKE; k++) {
             Snake *o = &snakes[k];
@@ -299,6 +302,8 @@ static void respawn(Snake *s, int isPlayer) {
     s->wander = 0;
     s->aggr = 0.7f + frand() * 0.6f;
     s->respawnTimer = 0;
+    s->burst = 0;
+    s->cool = 120 + rand() % 240;
     if (!isPlayer) s->skin = rand() % NSKIN;
     updateSize(s);
     for (int i = 0; i < MAXSEG; i++) {
@@ -400,9 +405,9 @@ static void botThink(int idx) {
         }
     }
 
-    float m = 220.0f;
-    if (hx < m || hx > WORLD - m || hy < m || hy > WORLD - m) {
-        goal = atan2f(WORLD / 2 - hy, WORLD / 2 - hx);
+    float cdx = hx - WR, cdy = hy - WR;
+    if (cdx * cdx + cdy * cdy > (WR - 230.0f) * (WR - 230.0f)) {
+        goal = atan2f(-cdy, -cdx);
         boost = 0;
     }
 
@@ -416,7 +421,8 @@ static void botThink(int idx) {
             float d = 28.0f + di * 32.0f;
             float w = (di == 0) ? 3.0f : (di == 1) ? 2.0f : 1.0f;
             float px = hx + ca * d, py = hy + sa * d;
-            if (px < 30 || py < 30 || px > WORLD - 30 || py > WORLD - 30) sc -= 6.0f * w;
+            float qx = px - WR, qy = py - WR;
+            if (qx * qx + qy * qy > (WR - 30.0f) * (WR - 30.0f)) sc -= 6.0f * w;
             if (dangerAt(idx, px, py, s->rad)) sc -= 8.0f * w;
         }
         if (sc > bestScore) {
@@ -425,6 +431,20 @@ static void botThink(int idx) {
         }
     }
     s->desired = bestA;
+
+    // boost so em rajadas curtas, com pausa depois (bots andam na velocidade normal)
+    if (s->cool > 0) s->cool -= 3;
+    if (boost && s->cool <= 0 && s->score > 30) {
+        s->burst += 3;
+        if (s->burst > 45) {
+            s->burst = 0;
+            s->cool = 300;
+            boost = 0;
+        }
+    } else {
+        boost = 0;
+        if (s->burst > 0) s->burst -= 1;
+    }
     s->boost = boost;
 }
 
@@ -480,7 +500,8 @@ static void collisions(void) {
     for (int a = 0; a < NSNAKE; a++) {
         Snake *s = &snakes[a];
         if (!s->alive) continue;
-        if (s->x[0] < 0 || s->y[0] < 0 || s->x[0] > WORLD || s->y[0] > WORLD) {
+        float wdx = s->x[0] - WR, wdy = s->y[0] - WR;
+        if (wdx * wdx + wdy * wdy > WR * WR) {
             dead[a] = 1;
             continue;
         }
@@ -645,6 +666,13 @@ static void renderMenu(void) {
 static void drawSnake(const Snake *s) {
     int r = (int)(s->rad * zoom);
     if (r < 2) r = 2;
+    if (s->boost && s->score > 3) { // brilho ao acelerar
+        for (int i = s->len - 1; i >= 0; i -= 2) {
+            int gx = SX(s->x[i]), gy = SY(s->y[i]);
+            if (gx < -r - 4 || gx > SW + r + 4 || gy < -r - 4 || gy > SH + r + 4) continue;
+            fillCircle(gx, gy, r + 3, shade(skinColor(s->skin, i), 1, 3));
+        }
+    }
     for (int i = s->len - 1; i >= 0; i--) {
         int sx = SX(s->x[i]), sy = SY(s->y[i]);
         if (sx < -r || sx > SW + r || sy < -r || sy > SH + r) continue;
@@ -674,13 +702,8 @@ static void renderGame(void) {
     if (zt < 0.55f) zt = 0.55f;
     zoom += (zt - zoom) * 0.04f;
 
-    fillRect(0, 0, SW, SH, RGB(18, 20, 30));
-    int left = SX(0.0f), right = SX(WORLD), top = SY(0.0f), bottom = SY(WORLD);
-    unsigned int red = RGB(110, 25, 25);
-    if (left > 0) fillRect(0, 0, left, SH, red);
-    if (right < SW) fillRect(right, 0, SW - right, SH, red);
-    if (top > 0) fillRect(0, 0, SW, top, red);
-    if (bottom < SH) fillRect(0, bottom, SW, SH - bottom, red);
+    fillRect(0, 0, SW, SH, RGB(120, 28, 28));
+    fillCircle(SX(WR), SY(WR), (int)(WR * zoom), RGB(18, 20, 30));
 
     // grade hexagonal de pontos
     float wx0 = camX - SW / 2 / zoom, wx1 = camX + SW / 2 / zoom;
@@ -692,7 +715,8 @@ static void renderGame(void) {
     for (int r = r0; r <= r1; r++)
         for (int c = c0; c <= c1; c++) {
             float gx = c * 60.0f + ((r & 1) ? 30.0f : 0.0f), gy = r * 50.0f;
-            if (gx < 0 || gy < 0 || gx > WORLD || gy > WORLD) continue;
+            float qx = gx - WR, qy = gy - WR;
+            if (qx * qx + qy * qy > (WR - 10.0f) * (WR - 10.0f)) continue;
             fillCircle(SX(gx), SY(gy), dr, RGB(36, 40, 60));
         }
 
@@ -703,7 +727,8 @@ static void renderGame(void) {
         if (sx < -8 || sx > SW + 8 || sy < -8 || sy > SH + 8) continue;
         int r = (int)((f->value >= 3 ? 5 : f->value == 2 ? 4 : 3) * zoom);
         if (r < 2) r = 2;
-        fillCircle(sx, sy, r + 2, shade(f->col, 1, 3));
+        int tw = (((frame / 12) + i) % 3 == 0) ? 3 : 2; // brilho pulsando
+        fillCircle(sx, sy, r + tw, shade(f->col, 1, 4));
         fillCircle(sx, sy, r, f->col);
     }
 
@@ -747,13 +772,13 @@ static void renderGame(void) {
     fillCircle(mcx, mcy, mr, RGB(12, 14, 22));
     for (int i = 1; i < NSNAKE; i++) {
         if (!snakes[i].alive) continue;
-        int mx = mcx + (int)((snakes[i].x[0] / WORLD - 0.5f) * 2 * 0.68f * mr);
-        int my = mcy + (int)((snakes[i].y[0] / WORLD - 0.5f) * 2 * 0.68f * mr);
+        int mx = mcx + (int)((snakes[i].x[0] - WR) / WR * 0.95f * mr);
+        int my = mcy + (int)((snakes[i].y[0] - WR) / WR * 0.95f * mr);
         fillRect(mx, my, 2, 2, skinColor(snakes[i].skin, 0));
     }
     if (p->alive) {
-        int mx = mcx + (int)((p->x[0] / WORLD - 0.5f) * 2 * 0.68f * mr);
-        int my = mcy + (int)((p->y[0] / WORLD - 0.5f) * 2 * 0.68f * mr);
+        int mx = mcx + (int)((p->x[0] - WR) / WR * 0.95f * mr);
+        int my = mcy + (int)((p->y[0] - WR) / WR * 0.95f * mr);
         fillCircle(mx, my, 2, RGB(255, 255, 255));
     }
 
