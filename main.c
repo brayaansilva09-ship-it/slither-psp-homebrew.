@@ -24,15 +24,15 @@ PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER);
 #define BUFW 512
 #define FRAME_BYTES (BUFW * SH * 4)
 
-#define WORLD 3000.0f
+#define WORLD 5000.0f
 #define WR (WORLD / 2.0f) // arena redonda: centro (WR,WR), raio WR
 #define MAXSEG 240
-#define NSNAKE 12
-#define FOOD_MAX 1000
-#define FOOD_AMBIENT 500
+#define NSNAKE 24
+#define FOOD_MAX 2200
+#define FOOD_AMBIENT 1300
 #define SPACING 6.0f
 #define NAMELEN 10
-#define NSKIN 8
+#define NSKIN 24
 #define PI 3.14159265f
 
 #define RGB(r, g, b) (0xFF000000u | ((b) << 16) | ((g) << 8) | (r))
@@ -78,6 +78,22 @@ static const Skin skins[NSKIN] = {
     {"ROXO", 2, {RGB(170, 80, 255), RGB(255, 100, 200)}, 3},
     {"ABELHA", 2, {RGB(250, 210, 40), RGB(50, 50, 50)}, 4},
     {"NEON", 2, {RGB(60, 255, 200), RGB(30, 120, 255)}, 2},
+    {"AZUL", 2, {RGB(50, 110, 255), RGB(30, 70, 200)}, 3},
+    {"VERMELHO", 2, {RGB(235, 50, 50), RGB(170, 30, 30)}, 3},
+    {"LARANJA", 2, {RGB(255, 150, 40), RGB(220, 105, 20)}, 3},
+    {"ROSA", 2, {RGB(255, 120, 190), RGB(230, 80, 150)}, 3},
+    {"AMARELO", 2, {RGB(255, 235, 70), RGB(225, 190, 30)}, 3},
+    {"BRASIL", 3, {RGB(30, 170, 70), RGB(255, 220, 40), RGB(40, 90, 200)}, 4},
+    {"EUA", 3, {RGB(220, 50, 60), RGB(245, 245, 250), RGB(50, 80, 170)}, 4},
+    {"ITALIA", 3, {RGB(30, 150, 70), RGB(245, 245, 245), RGB(210, 40, 50)}, 4},
+    {"ALEMANHA", 3, {RGB(60, 60, 70), RGB(220, 40, 40), RGB(255, 205, 40)}, 4},
+    {"FRANCA", 3, {RGB(50, 80, 190), RGB(245, 245, 245), RGB(220, 50, 60)}, 4},
+    {"JAPAO", 2, {RGB(245, 245, 245), RGB(220, 40, 60)}, 5},
+    {"ARGENTINA", 2, {RGB(120, 190, 255), RGB(245, 245, 245)}, 4},
+    {"CANDY", 2, {RGB(255, 80, 110), RGB(255, 245, 245)}, 2},
+    {"OCEANO", 3, {RGB(20, 90, 170), RGB(40, 170, 200), RGB(150, 230, 230)}, 3},
+    {"LAVA", 3, {RGB(90, 20, 20), RGB(230, 70, 30), RGB(255, 190, 50)}, 3},
+    {"FLORESTA", 3, {RGB(20, 90, 40), RGB(70, 150, 60), RGB(150, 200, 80)}, 3},
 };
 
 static const char *botNames[] = {
@@ -98,6 +114,8 @@ static int frameIdx = 0;
 static int frame = 0;
 static int state = ST_MENU;
 static int best = 0;
+static int deadTimer = 0;
+static int playerKills = 0;
 
 static char playerName[NAMELEN + 1] = "PLAYER    ";
 static int skinSel = 0;
@@ -315,8 +333,8 @@ static void respawn(Snake *s, int isPlayer) {
 static void killSnake(Snake *s) {
     s->alive = 0;
     s->respawnTimer = 180 + rand() % 240;
-    for (int i = 0; i < s->len; i += 2)
-        dropFood(s->x[i], s->y[i], 3, skinColor(s->skin, i));
+    for (int i = 0; i < s->len; i++)
+        dropFood(s->x[i], s->y[i], 2, skinColor(s->skin, i));
 }
 
 static float normAngle(float d) {
@@ -495,8 +513,9 @@ static void updateSnake(Snake *s) {
 }
 
 static void collisions(void) {
-    int dead[NSNAKE];
+    int dead[NSNAKE], killer[NSNAKE];
     memset(dead, 0, sizeof dead);
+    for (int q = 0; q < NSNAKE; q++) killer[q] = -1;
     for (int a = 0; a < NSNAKE; a++) {
         Snake *s = &snakes[a];
         if (!s->alive) continue;
@@ -518,13 +537,17 @@ static void collisions(void) {
                 dy = o->y[j] - s->y[0];
                 if (dx * dx + dy * dy < lim) {
                     dead[a] = 1;
+                    killer[a] = b;
                     break;
                 }
             }
         }
     }
     for (int a = 0; a < NSNAKE; a++)
-        if (dead[a]) killSnake(&snakes[a]);
+        if (dead[a]) {
+            if (killer[a] == 0) playerKills++;
+            killSnake(&snakes[a]);
+        }
 }
 
 static void startGame(void) {
@@ -536,6 +559,7 @@ static void startGame(void) {
     respawn(&snakes[0], 1);
     for (int i = 1; i < NSNAKE; i++) respawn(&snakes[i], 0);
     zoom = 1.0f;
+    playerKills = 0;
     state = ST_PLAY;
 }
 
@@ -554,8 +578,10 @@ static void gameUpdate(const SceCtrlData *pad, unsigned int pressed) {
         if (lx * lx + ly * ly > 0.12f) p->desired = atan2f(ly, lx);
         p->boost = (pad->Buttons & (PSP_CTRL_CROSS | PSP_CTRL_RTRIGGER)) != 0;
     } else {
-        if (pressed & PSP_CTRL_CROSS) { startGame(); return; }
-        if (pressed & PSP_CTRL_TRIANGLE) { state = ST_MENU; return; }
+        if (--deadTimer <= 0 || (pressed & (PSP_CTRL_CROSS | PSP_CTRL_TRIANGLE))) {
+            state = ST_MENU;
+            return;
+        }
     }
 
     int wasAlive = p->alive;
@@ -571,7 +597,10 @@ static void gameUpdate(const SceCtrlData *pad, unsigned int pressed) {
     collisions();
 
     if (p->alive && displayLen(p) > best) best = displayLen(p);
-    if (wasAlive && !p->alive) saveData();
+    if (wasAlive && !p->alive) {
+        saveData();
+        deadTimer = 120;
+    }
 
     int active = 0;
     for (int i = 0; i < FOOD_MAX; i++) active += foods[i].active;
@@ -749,7 +778,7 @@ static void renderGame(void) {
     }
     int lx = SW - 138;
     drawText("PLACAR", lx, 6, 2, RGB(255, 255, 255));
-    for (int i = 0; i < n && i < 8; i++) {
+    for (int i = 0; i < n && i < 10; i++) {
         Snake *s = &snakes[order[i]];
         unsigned int c = (order[i] == 0) ? RGB(255, 230, 80) : RGB(215, 220, 232);
         drawText(s->name, lx, 22 + i * 12, 2, c);
@@ -763,6 +792,8 @@ static void renderGame(void) {
         if (snakes[i].alive && snakes[i].score > p->score) rank++;
     snprintf(buf, sizeof buf, "TAMANHO: %d", displayLen(p));
     drawText(buf, 8, SH - 34, 2, RGB(255, 255, 255));
+    snprintf(buf, sizeof buf, "ABATES: %d", playerKills);
+    drawText(buf, 8, SH - 48, 2, RGB(200, 205, 220));
     snprintf(buf, sizeof buf, "RANK: %d/%d", rank, n > 0 ? n : 1);
     drawText(buf, 8, SH - 20, 2, RGB(200, 205, 220));
 
@@ -790,8 +821,9 @@ static void renderGame(void) {
         drawTextC(buf, SW / 2, 124, 2, RGB(255, 255, 255));
         snprintf(buf, sizeof buf, "RECORDE: %d", best);
         drawTextC(buf, SW / 2, 142, 2, RGB(255, 230, 80));
-        drawTextC("X JOGAR DE NOVO", SW / 2, 166, 2, RGB(190, 195, 210));
-        drawTextC("TRIANGULO MENU", SW / 2, 180, 2, RGB(190, 195, 210));
+        snprintf(buf, sizeof buf, "ABATES: %d", playerKills);
+        drawTextC(buf, SW / 2, 160, 2, RGB(200, 205, 220));
+        drawTextC("VOLTANDO AO MENU...", SW / 2, 180, 2, RGB(190, 195, 210));
     }
 }
 
