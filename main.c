@@ -33,7 +33,7 @@ PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER);
 #define FOOD_AMBIENT 1300
 #define SPACING 6.0f
 #define NAMELEN 10
-#define NSKIN 32 // precisa ser multiplo de 8 (grade 8 colunas)
+#define NSKIN 48 // precisa ser multiplo de 8 (grade 8 colunas)
 #define SKIN_COLS 8
 #define PI 3.14159265f
 
@@ -66,13 +66,13 @@ typedef struct {
     int skin, best, lang, bots, food, names;
 } Save;
 
-enum { ST_MENU, ST_PLAY, ST_SKINS, ST_SETTINGS };
+enum { ST_MENU, ST_PLAY, ST_SKINS, ST_SETTINGS, ST_PAUSE, ST_DEV };
 
 // ------------------------------------------------------------ textos (3 idiomas)
 enum {
     S_PLAY, S_NAME, S_SKIN, S_SETTINGS, S_RECORD, S_HELP_MENU, S_HELP_EDIT, S_LEADER,
     S_LENGTH, S_RANK, S_KILLS, S_DIED, S_BACKMENU, S_LANG, S_BOTS, S_FOOD, S_NAMES,
-    S_BACK, S_HELP_SKINS, S_HELP_SET, S_LOW, S_NORMAL, S_HIGH, S_ON, S_OFF, NSTR
+    S_BACK, S_HELP_SKINS, S_HELP_SET, S_LOW, S_NORMAL, S_HIGH, S_ON, S_OFF, S_PAUSED, S_HELP_PAUSE, NSTR
 };
 
 static const char *T[NSTR][3] = {
@@ -104,6 +104,8 @@ static const char *T[NSTR][3] = {
     {"MUITA", "HIGH", "MUCHA"},
     {"SIM", "ON", "SI"},
     {"NAO", "OFF", "NO"},
+    {"PAUSADO", "PAUSED", "PAUSA"},
+    {"START CONTINUAR   SELECT MENU", "START RESUME   SELECT MENU", "START SEGUIR   SELECT MENU"},
 };
 static int lang = 0;
 #define TXT(id) (T[id][lang])
@@ -144,6 +146,22 @@ static const Skin skins[NSKIN] = {
     {"CEREJA", 2, {RGB(210, 30, 70), RGB(255, 120, 150)}, 2},
     {"MENTA", 2, {RGB(150, 255, 200), RGB(90, 210, 160)}, 3},
     {"CARVAO", 2, {RGB(150, 150, 160), RGB(70, 70, 85)}, 3},
+    {"SOL", 2, {RGB(255, 200, 40), RGB(255, 120, 30)}, 3},
+    {"LUA", 2, {RGB(230, 230, 245), RGB(150, 160, 190)}, 3},
+    {"GALAXIA", 3, {RGB(40, 20, 90), RGB(120, 60, 200), RGB(255, 120, 220)}, 3},
+    {"PIRATA", 3, {RGB(200, 40, 40), RGB(60, 60, 70), RGB(235, 235, 235)}, 3},
+    {"MORANGO", 2, {RGB(235, 50, 80), RGB(255, 130, 150)}, 3},
+    {"TIGRE", 2, {RGB(255, 150, 30), RGB(60, 45, 35)}, 3},
+    {"PANDA", 2, {RGB(245, 245, 245), RGB(60, 60, 70)}, 5},
+    {"SORVETE", 3, {RGB(255, 190, 210), RGB(255, 245, 200), RGB(150, 230, 200)}, 3},
+    {"VULCAO", 2, {RGB(90, 30, 30), RGB(240, 90, 30)}, 4},
+    {"CRISTAL", 3, {RGB(150, 220, 255), RGB(200, 170, 255), RGB(255, 200, 230)}, 2},
+    {"SELVA", 3, {RGB(40, 120, 50), RGB(240, 200, 50), RGB(150, 60, 40)}, 3},
+    {"CIBER", 2, {RGB(0, 255, 200), RGB(255, 0, 160)}, 2},
+    {"CAMUFLADO", 3, {RGB(70, 90, 50), RGB(110, 120, 70), RGB(60, 60, 40)}, 3},
+    {"METAL", 2, {RGB(180, 185, 195), RGB(110, 115, 130)}, 2},
+    {"CHOCOLATE", 2, {RGB(110, 60, 30), RGB(220, 170, 120)}, 3},
+    {"FANTASMA", 2, {RGB(235, 240, 255), RGB(170, 180, 230)}, 2},
 };
 
 static const char *botNames[] = {
@@ -168,7 +186,12 @@ static int deadTimer = 0;
 static int playerKills = 0;
 
 static char playerName[NAMELEN + 1] = "PLAYER    ";
-static int skinSel = 0, skinCursor = 0;
+static int skinSel = 0, skinCursor = 0, skinScroll = 0;
+
+// menu de desenvolvedor (abre na pausa com X X O O X X)
+static int devFps = 0, devImmortal = 0, devInfBoost = 0, devFreeze = 0;
+static int devSel = 0, devSpeedQ = 4, fpsValue = 0; // velocidade em quartos (4 = 1.00x)
+static int codeSeq[6];
 static int menuSel = 0, editing = 0, cursorPos = 0;
 
 // configuracoes
@@ -568,12 +591,14 @@ static void updateSnake(Snake *s) {
     s->ang += diff;
 
     float speed = 1.8f;
-    if (s->boost && s->score > 3) {
+    int infB = (devInfBoost && s == &snakes[0]);
+    if (s->boost && (s->score > 3 || infB)) {
         speed = 3.4f;
-        s->score -= 0.15f;
+        if (!infB) s->score -= 0.15f;
         if (++s->tick % 12 == 0)
             dropFood(s->x[s->len - 1], s->y[s->len - 1], 1, skinColor(s->skin, s->len - 1));
     }
+    if (s == &snakes[0]) speed *= devSpeedQ * 0.25f;
     s->x[0] += cosf(s->ang) * speed;
     s->y[0] += sinf(s->ang) * speed;
     updateSize(s);
@@ -613,6 +638,15 @@ static void collisions(void) {
     for (int a = 0; a < NSNAKE; a++) {
         Snake *s = &snakes[a];
         if (!s->alive) continue;
+        if (a == 0 && devImmortal) { // imortal: nao morre, so e empurrado de volta pra arena
+            float ix = s->x[0] - WR, iy = s->y[0] - WR, id2 = ix * ix + iy * iy;
+            if (id2 > (WR - 6.0f) * (WR - 6.0f)) {
+                float k = (WR - 6.0f) / sqrtf(id2);
+                s->x[0] = WR + ix * k;
+                s->y[0] = WR + iy * k;
+            }
+            continue;
+        }
         float wdx = s->x[0] - WR, wdy = s->y[0] - WR;
         if (wdx * wdx + wdy * wdy > WR * WR) {
             dead[a] = 1;
@@ -664,7 +698,7 @@ static void startGame(void) {
 static void gameUpdate(const SceCtrlData *pad, unsigned int pressed) {
     Snake *p = &snakes[0];
     if (pressed & PSP_CTRL_START) {
-        state = ST_MENU;
+        state = p->alive ? ST_PAUSE : ST_MENU;
         return;
     }
     if (p->alive) {
@@ -689,6 +723,7 @@ static void gameUpdate(const SceCtrlData *pad, unsigned int pressed) {
             if (i > 0 && i <= botCount && --s->respawnTimer <= 0) respawn(s, 0);
             continue;
         }
+        if (i > 0 && devFreeze) continue;
         if (i > 0 && ((frame + i) % 3 == 0)) botThink(i);
         updateSnake(s);
     }
@@ -768,7 +803,11 @@ static void menuUpdate(unsigned int pressed) {
     if (pressed & PSP_CTRL_CROSS) {
         if (menuSel == 0) startGame();
         else if (menuSel == 1) editing = 1;
-        else if (menuSel == 2) { skinCursor = skinSel; state = ST_SKINS; }
+        else if (menuSel == 2) {
+            skinCursor = skinSel;
+            skinScroll = (skinCursor / SKIN_COLS > 3) ? skinCursor / SKIN_COLS - 3 : 0;
+            state = ST_SKINS;
+        }
         else { setSel = 0; state = ST_SETTINGS; }
     }
 }
@@ -818,6 +857,11 @@ static void skinsUpdate(unsigned int pressed) {
         skinCursor = (skinCursor >= SKIN_COLS) ? skinCursor - SKIN_COLS : skinCursor + NSKIN - SKIN_COLS;
     if (pressed & PSP_CTRL_DOWN)
         skinCursor = (skinCursor + SKIN_COLS < NSKIN) ? skinCursor + SKIN_COLS : skinCursor - (NSKIN - SKIN_COLS);
+    {
+        int row = skinCursor / SKIN_COLS;
+        if (row < skinScroll) skinScroll = row;
+        if (row > skinScroll + 3) skinScroll = row - 3;
+    }
     if (pressed & PSP_CTRL_CROSS) {
         skinSel = skinCursor;
         saveData();
@@ -830,11 +874,18 @@ static void renderSkins(void) {
     drawMenuBackground();
     drawText(TXT(S_SKIN), 16, 8, 3, RGB(90, 255, 140));
     drawTextR(TXT(S_HELP_SKINS), SW - 16, 14, 1, RGB(140, 145, 165));
+    {
+        char nb[16];
+        snprintf(nb, sizeof nb, "%d/%d", skinCursor + 1, NSKIN);
+        drawText(nb, 120, 12, 2, RGB(190, 195, 210));
+    }
 
     int x0 = 16, y0 = 32, cw = 56, ch = 52;
     int rows = NSKIN / SKIN_COLS;
     for (int i = 0; i < NSKIN; i++) {
-        int cx = x0 + (i % SKIN_COLS) * cw, cy = y0 + (i / SKIN_COLS) * ch;
+        int vrow = i / SKIN_COLS - skinScroll;
+        if (vrow < 0 || vrow > 3) continue;
+        int cx = x0 + (i % SKIN_COLS) * cw, cy = y0 + vrow * ch;
         int isSel = (i == skinCursor);
         if (isSel) fillRect(cx + 1, cy + 1, cw - 2, ch - 2, RGB(255, 230, 80));
         fillRect(cx + 3, cy + 3, cw - 6, ch - 6, isSel ? RGB(40, 46, 70) : RGB(22, 26, 40));
@@ -1045,6 +1096,119 @@ static void renderGame(void) {
     }
 }
 
+// ------------------------------------------------------------ pausa e DEV menu
+static void pauseUpdate(unsigned int pressed) {
+    if (pressed & PSP_CTRL_START) { state = ST_PLAY; return; }
+    if (pressed & PSP_CTRL_SELECT) { state = ST_MENU; return; }
+
+    // codigo secreto: X X O O X X (qualquer outro botao de acao zera a sequencia)
+    int v = 0;
+    if (pressed & PSP_CTRL_CROSS) v = 1;
+    else if (pressed & PSP_CTRL_CIRCLE) v = 2;
+    else if (pressed & (PSP_CTRL_SQUARE | PSP_CTRL_TRIANGLE)) v = 3;
+    if (v) {
+        memmove(codeSeq, codeSeq + 1, 5 * sizeof(int));
+        codeSeq[5] = v;
+        static const int want[6] = {1, 1, 2, 2, 1, 1};
+        if (memcmp(codeSeq, want, sizeof want) == 0) {
+            memset(codeSeq, 0, sizeof codeSeq);
+            devSel = 0;
+            state = ST_DEV;
+        }
+    }
+}
+
+static void renderPause(void) {
+    renderGame();
+    dimRect(100, 66, 280, 100);
+    dimRect(100, 66, 280, 100);
+    fillRect(100, 66, 280, 3, RGB(90, 255, 140));
+    drawTextC(TXT(S_PAUSED), SW / 2, 84, 4, RGB(255, 255, 255));
+    drawTextC(TXT(S_HELP_PAUSE), SW / 2, 134, 2, RGB(200, 205, 220));
+}
+
+static void devUpdate(unsigned int pressed) {
+    Snake *p = &snakes[0];
+    if (pressed & (PSP_CTRL_START | PSP_CTRL_CIRCLE | PSP_CTRL_TRIANGLE)) {
+        state = ST_PAUSE;
+        return;
+    }
+    if (pressed & PSP_CTRL_UP) devSel = (devSel + 8) % 9;
+    if (pressed & PSP_CTRL_DOWN) devSel = (devSel + 1) % 9;
+    int d = 0;
+    if (pressed & PSP_CTRL_RIGHT) d = 1;
+    if (pressed & PSP_CTRL_LEFT) d = -1;
+    int act = (pressed & PSP_CTRL_CROSS) != 0;
+
+    if (devSel == 0) {
+        if (d || act) devFps ^= 1;
+    } else if (devSel == 1) {
+        if (d || act) devImmortal ^= 1;
+    } else if (devSel == 2) {
+        int step = d * 30;
+        if (pressed & PSP_CTRL_LTRIGGER) step = -300;
+        if (pressed & PSP_CTRL_RTRIGGER) step = 300;
+        if (step && p->alive) {
+            p->score += step;
+            if (p->score < 0) p->score = 0;
+            if (p->score > 2000) p->score = 2000;
+            updateSize(p);
+        }
+    } else if (devSel == 3) {
+        if (d) {
+            devSpeedQ += d;
+            if (devSpeedQ < 2) devSpeedQ = 2;
+            if (devSpeedQ > 12) devSpeedQ = 12;
+        }
+    } else if (devSel == 4) {
+        if (d || act) devInfBoost ^= 1;
+    } else if (devSel == 5) {
+        if (d || act) devFreeze ^= 1;
+    } else if (devSel == 6) {
+        if (act)
+            for (int i = 1; i < NSNAKE; i++)
+                if (snakes[i].alive) killSnake(&snakes[i]);
+    } else if (devSel == 7) {
+        if (act && p->alive)
+            for (int k = 0; k < 150; k++) {
+                float a = frand() * 2 * PI, dd = frand() * 450.0f;
+                float fx = p->x[0] + cosf(a) * dd, fy = p->y[0] + sinf(a) * dd;
+                float qx = fx - WR, qy = fy - WR;
+                if (qx * qx + qy * qy > (WR - 20.0f) * (WR - 20.0f)) continue;
+                dropFood(fx, fy, 2, skinColor(rand() % NSKIN, 0));
+            }
+    } else if (devSel == 8) {
+        if (act) state = ST_PAUSE;
+    }
+}
+
+static void renderDev(void) {
+    static const char *names[9] = {"FPS COUNTER", "IMMORTAL",       "SNAKE SIZE",
+                                   "PLAYER SPEED", "INFINITE BOOST", "FREEZE BOTS",
+                                   "KILL ALL BOTS", "FOOD RAIN",      "BACK"};
+    char buf[32];
+    renderGame();
+    dimRect(0, 0, SW, SH);
+    dimRect(0, 0, SW, SH);
+    drawTextC("DEV MENU", SW / 2, 8, 3, RGB(255, 120, 120));
+    for (int i = 0; i < 9; i++) {
+        int y = 38 + i * 22;
+        unsigned int c = (devSel == i) ? RGB(255, 230, 80) : RGB(190, 195, 210);
+        drawText(devSel == i ? ">" : " ", 50, y, 2, c);
+        drawText(names[i], 66, y, 2, c);
+        buf[0] = 0;
+        if (i == 0) snprintf(buf, sizeof buf, "< %s >", devFps ? "ON" : "OFF");
+        else if (i == 1) snprintf(buf, sizeof buf, "< %s >", devImmortal ? "ON" : "OFF");
+        else if (i == 2) snprintf(buf, sizeof buf, "< %d >", displayLen(&snakes[0]));
+        else if (i == 3) snprintf(buf, sizeof buf, "< %d.%02dX >", devSpeedQ / 4, (devSpeedQ % 4) * 25);
+        else if (i == 4) snprintf(buf, sizeof buf, "< %s >", devInfBoost ? "ON" : "OFF");
+        else if (i == 5) snprintf(buf, sizeof buf, "< %s >", devFreeze ? "ON" : "OFF");
+        else if (i == 6 || i == 7) snprintf(buf, sizeof buf, "[ X ]");
+        if (buf[0]) drawText(buf, 290, y, 2, c);
+    }
+    drawTextC("L/R CHANGE   X ACTION   O BACK", SW / 2, 252, 2, RGB(140, 145, 165));
+}
+
 // ------------------------------------------------------------ sistema
 static int exitCb(int a, int b, void *c) {
     sceKernelExitGame();
@@ -1092,10 +1256,23 @@ int main(void) {
         unsigned int pressed = pad.Buttons & ~prev;
         prev = pad.Buttons;
         frame++;
+        {
+            static unsigned int fpsT0 = 0;
+            static int fpsCount = 0;
+            unsigned int now = sceKernelGetSystemTimeLow();
+            fpsCount++;
+            if (now - fpsT0 >= 1000000u) {
+                fpsValue = fpsCount;
+                fpsCount = 0;
+                fpsT0 = now;
+            }
+        }
 
         if (state == ST_MENU) menuUpdate(pressed);
         else if (state == ST_SKINS) skinsUpdate(pressed);
         else if (state == ST_SETTINGS) settingsUpdate(pressed);
+        else if (state == ST_PAUSE) pauseUpdate(pressed);
+        else if (state == ST_DEV) devUpdate(pressed);
         else gameUpdate(&pad, pressed);
 
         int back = 1 - frameIdx;
@@ -1103,7 +1280,15 @@ int main(void) {
         if (state == ST_MENU) renderMenu();
         else if (state == ST_SKINS) renderSkins();
         else if (state == ST_SETTINGS) renderSettings();
+        else if (state == ST_PAUSE) renderPause();
+        else if (state == ST_DEV) renderDev();
         else renderGame();
+
+        if (devFps) {
+            char fb[16];
+            snprintf(fb, sizeof fb, "FPS: %d", fpsValue);
+            drawTextC(fb, SW / 2, 4, 2, RGB(120, 255, 120));
+        }
 
         sceKernelDcacheWritebackAll();
         sceDisplayWaitVblankStart();
